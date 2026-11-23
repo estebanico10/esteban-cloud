@@ -1,6 +1,6 @@
 {
   "name": "esteban-cloud",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Esteban Cloud — nube personal bidireccional en malla con túnel cifrado, llaves encriptadas para pendrive y acceso web/móvil",
   "author": "Esteban Nicola",
   "homepage": "https://estebanico.com",
@@ -13,6 +13,7 @@
     "start": "electron .",
     "dist:win": "npm run build && electron-builder --win nsis --publish never",
     "dist:dir": "npm run build && electron-builder --dir --win --publish never",
+    "release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-update.ps1",
     "test": "node --test test/*.test.cjs"
   },
   "dependencies": {

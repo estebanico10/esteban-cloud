@@ -1729,7 +1729,7 @@ export default function App() {
                     checked={config.autoCheckUpdates !== false}
                     onChange={(e) => setState({ ...state, config: { ...config, autoCheckUpdates: e.target.checked } })}
                   />
-                  <span>Buscar actualizaciones automáticamente en segundo plano (cada 15 min y al conectar)</span>
+                  <span>Buscar actualizaciones automáticamente en segundo plano (al iniciar, cada 3 min y por push Tailscale)</span>
                 </label>
                 <label className="checkbox-row">
                   <input
@@ -1737,7 +1737,7 @@ export default function App() {
                     checked={config.autoDownloadUpdates !== false}
                     onChange={(e) => setState({ ...state, config: { ...config, autoDownloadUpdates: e.target.checked } })}
                   />
-                  <span>Pre-descargar y verificar SHA-256 automáticamente cuando aparezca una versión nueva</span>
+                  <span>Pre-descargar y verificar SHA-256 automáticamente desde Tailscale o GitHub Releases</span>
                 </label>
                 <label className="checkbox-row">
                   <input
@@ -1745,7 +1745,7 @@ export default function App() {
                     checked={config.autoInstallWhenIdle !== false}
                     onChange={(e) => setState({ ...state, config: { ...config, autoInstallWhenIdle: e.target.checked } })}
                   />
-                  <span>Instalar y reiniciar automáticamente si no hay discos Z:/Y: montados en uso</span>
+                  <span>Instalar y reiniciar automáticamente sin intervención en cuanto la actualización esté verificada</span>
                 </label>
 
                 <div className="row">

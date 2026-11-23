@@ -411,6 +411,23 @@ class EstebanCloudServer {
         return fs.createReadStream(latest.fullPath).pipe(res);
       }
 
+      if (req.method === 'POST' && pathname === '/api/updates/mesh-broadcast') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'Solo equipos de la malla Tailscale o LAN pueden anunciar actualizaciones.' });
+        }
+        const body = await readJsonBody(req);
+        const fromUrl = String(body.fromUrl || '').trim();
+        const version = String(body.version || '').trim();
+        if (fromUrl && !/^https?:\/\/.+/i.test(fromUrl)) {
+          return sendJson(res, 400, { error: 'fromUrl inválido.' });
+        }
+        this.log('info', `Broadcast automático de actualización recibido (${version || 'nueva versión'}) desde ${fromUrl || ip}`);
+        if (this.onUpdateNotice) {
+          Promise.resolve(this.onUpdateNotice({ fromUrl, version, autoTriggered: true })).catch(() => {});
+        }
+        return sendJson(res, 202, { ok: true, accepted: true });
+      }
+
       // Auth endpoints
       if (req.method === 'POST' && pathname === '/api/auth/unlock-bundle') {
         if (!this.checkRateLimit(ip)) {

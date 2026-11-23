@@ -332,6 +332,17 @@ test('self-hosted updater: serves latest Setup exe with SHA-256 verification and
     });
     assert.equal(rwPush.status, 202);
     assert.equal(notifiedPayload.version, '9.9.9');
+
+    // Trusted mesh broadcast endpoint (/api/updates/mesh-broadcast) works without session token from mesh/localhost
+    notifiedPayload = null;
+    const meshPush = await req(`${base}/api/updates/mesh-broadcast`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromUrl: 'http://100.64.0.99:4789', version: '9.9.10' })
+    });
+    assert.equal(meshPush.status, 202);
+    assert.equal(notifiedPayload.version, '9.9.10');
+    assert.equal(notifiedPayload.autoTriggered, true);
   } finally {
     await srv.stop();
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -965,9 +965,9 @@ async function runAutoUpdateCycle({ priorityUrl, trigger = 'timer' } = {}) {
       mainWindow.webContents.send('cloud:updateAvailable', updatedInfo);
     }
 
-    // Auto-install only when explicitly enabled, app is packaged, and NO remote drives are currently mounted
-    if (readyPath && store.data.autoInstallWhenIdle && app.isPackaged && mountManager.listMounts().length === 0) {
-      server.log('info', `Sin discos montados en uso: aplicando actualización v${info.latestVersion} automáticamente...`);
+    // Zero-touch auto-install: unmount any active remote drives cleanly, install silently (/S), and restart
+    if (readyPath && store.data.autoInstallWhenIdle && app.isPackaged) {
+      server.log('info', `Aplicando actualización automática v${info.latestVersion} y reiniciando...`);
       await applyInstallerAndRestart(readyPath);
       return updatedInfo;
     }
@@ -1047,20 +1047,109 @@ async function notifyPeerOfLocalUpdate(sess) {
   }
 }
 
+async function broadcastUpdateToAllMeshPeers() {
+  const localLatest = findLatestLocalRelease(getDefaultUpdateDirs(store.data.updateShareDir, path.join(__dirname, '..')));
+  const env = await checkEnvironment();
+  const port = server.boundPort || store.data.port || 4789;
+  const selfUrl = env.tailscale.ip ? `http://${env.tailscale.ip}:${port}` : (env.lanIp ? `http://${env.lanIp}:${port}` : '');
+  const versionToAnnounce = localLatest ? localLatest.version : app.getVersion();
+
+  const results = [];
+  const notifiedUrls = new Set();
+
+  // 1. Active client sessions (authenticated push + legacy file upload fallback)
+  for (const sess of clientSessions.values()) {
+    try {
+      results.push(await notifyPeerOfLocalUpdate(sess));
+      if (sess.baseUrl) notifiedUrls.add(sess.baseUrl.replace(/\/$/, ''));
+    } catch (err) {
+      results.push({ peer: sess.nodeName, ok: false, reason: err.message });
+    }
+  }
+
+  // 2. All online Windows peers in Tailscale mesh + savedPeers (zero-config mesh broadcast)
+  const targetPeers = [];
+  for (const tp of (env.tailscale.peers || [])) {
+    if (tp.online && tp.ip && tp.os === 'windows') {
+      targetPeers.push({ name: tp.hostName || tp.ip, baseUrl: `http://${tp.ip}:${port}` });
+    }
+  }
+  for (const sp of (store.data.savedPeers || [])) {
+    const spPort = Number(sp.port) || 4789;
+    if (sp.tailscaleIp) targetPeers.push({ name: sp.nodeName || sp.label || sp.tailscaleIp, baseUrl: `http://${sp.tailscaleIp}:${spPort}` });
+  }
+
+  for (const t of targetPeers) {
+    const cleanBase = t.baseUrl.replace(/\/$/, '');
+    if (notifiedUrls.has(cleanBase)) continue;
+    notifiedUrls.add(cleanBase);
+    try {
+      await httpJsonRequest(`${cleanBase}/api/updates/mesh-broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromUrl: selfUrl, version: versionToAnnounce }),
+        timeout: 4000
+      });
+      server.log('info', `Broadcast automático v${versionToAnnounce} entregado a ${t.name} (${cleanBase}).`);
+      results.push({ peer: t.name, ok: true, mode: 'push-notify', version: versionToAnnounce });
+    } catch (err) {
+      results.push({ peer: t.name, ok: false, reason: err.message });
+    }
+  }
+
+  return results;
+}
+
+let lastSyncedReleaseSha = '';
+async function syncLocalReleaseToKitsAndMesh() {
+  try {
+    const localLatest = findLatestLocalRelease(getDefaultUpdateDirs(store.data.updateShareDir, path.join(__dirname, '..')));
+    if (!localLatest || !localLatest.sha256) return;
+    if (localLatest.sha256 === lastSyncedReleaseSha) return;
+    lastSyncedReleaseSha = localLatest.sha256;
+
+    // Auto-sync new installer to connected USB Pendrive Kits (E:\Esteban-Cloud-Kit, F:\Esteban-Cloud-Kit, etc.)
+    const env = await checkEnvironment();
+    const kitDirs = ['E:\\CODE\\ESTEBAN CLOUD\\release'];
+    for (const d of (env.usbDrives || [])) {
+      kitDirs.push(path.join(d.root, 'Esteban-Cloud-Kit'));
+    }
+    for (const dir of kitDirs) {
+      try {
+        if (!fs.existsSync(dir) || path.resolve(dir).toLowerCase() === path.resolve(localLatest.sourceDir).toLowerCase()) continue;
+        const targetExe = path.join(dir, localLatest.fileName);
+        if (!fs.existsSync(targetExe)) {
+          for (const f of fs.readdirSync(dir)) {
+            if (/^Esteban-Cloud-Setup-\d+\.\d+\.\d+\.exe$/i.test(f) && f !== localLatest.fileName) {
+              try { fs.unlinkSync(path.join(dir, f)); } catch {}
+            }
+          }
+          fs.copyFileSync(localLatest.fullPath, targetExe);
+          server.log('info', `Instalador ${localLatest.fileName} sincronizado automáticamente en ${dir}`);
+        }
+      } catch {
+        // ignore read-only or disconnected USB
+      }
+    }
+
+    // Automatically broadcast to all online Tailscale peers
+    await broadcastUpdateToAllMeshPeers();
+
+    // And if this machine itself is running an older version than localLatest, trigger self-update
+    if (compareSemver(localLatest.version, app.getVersion()) > 0) {
+      runAutoUpdateCycle({ trigger: 'watcher' }).catch(() => {});
+    }
+  } catch {
+    // ignore background watcher errors
+  }
+}
+
   ipcMain.handle('updates:check', async () => checkUpdatesCore());
 
   ipcMain.handle('updates:pushToConnectedPeers', async () => {
-    const sessions = Array.from(clientSessions.values());
-    if (!sessions.length) {
-      throw new Error('No hay equipos conectados en "Conectar (Cliente)" en este momento. Nota: los equipos con v0.1.6+ también buscan y descargan automáticamente desde este equipo cada 15 minutos sin necesidad de empujar manualmente.');
-    }
-    const results = [];
-    for (const sess of sessions) {
-      try {
-        results.push(await notifyPeerOfLocalUpdate(sess));
-      } catch (err) {
-        results.push({ peer: sess.nodeName, ok: false, reason: err.message });
-      }
+    const results = await broadcastUpdateToAllMeshPeers();
+    if (!results.length) {
+      throw new Error('No se detectaron otros equipos Windows en línea en Tailscale en este momento. Cuando se enciendan, se actualizarán automáticamente desde este equipo o desde GitHub Releases.');
     }
     return { results };
   });
@@ -1441,13 +1530,17 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Automatic background update check (12s after startup + every 15 minutes)
+  // Automatic background update check + local release watcher & mesh broadcast (8s after startup + every 3 minutes)
   setTimeout(() => {
+    syncLocalReleaseToKitsAndMesh().catch(() => {});
     runAutoUpdateCycle({ trigger: 'startup' }).catch(() => {});
-  }, 12000);
+  }, 8000);
+  setInterval(() => {
+    syncLocalReleaseToKitsAndMesh().catch(() => {});
+  }, 45 * 1000);
   setInterval(() => {
     runAutoUpdateCycle({ trigger: 'timer' }).catch(() => {});
-  }, 15 * 60 * 1000);
+  }, 3 * 60 * 1000);
 });
 
 app.on('before-quit', async () => {
