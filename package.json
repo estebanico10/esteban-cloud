@@ -1,0 +1,85 @@
+{
+  "name": "esteban-cloud",
+  "version": "0.2.1",
+  "description": "Esteban Cloud — nube personal bidireccional en malla con túnel cifrado, llaves encriptadas para pendrive y acceso web/móvil",
+  "author": "Esteban Nicola",
+  "homepage": "https://estebanico.com",
+  "license": "MIT",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "vite build",
+    "start": "electron .",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:dir": "npm run build && electron-builder --dir --win --publish never",
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "lucide-react": "^0.468.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.5.0",
+    "concurrently": "^9.2.1",
+    "electron": "^35.2.0",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.3.5",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.estebanico.estebancloud",
+    "productName": "Esteban Cloud",
+    "artifactName": "Esteban-Cloud-Setup-${version}.${ext}",
+    "copyright": "Copyright © 2026 Esteban Nicola",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "estebanico10",
+        "repo": "esteban-cloud",
+        "releaseType": "release"
+      }
+    ],
+    "asar": true,
+    "files": [
+      "electron/**",
+      "scripts/**",
+      "build/icon.ico",
+      "build/icon.png",
+      "dist/**",
+      "node_modules/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts",
+        "to": "scripts"
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "include": "build/installer.nsh",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

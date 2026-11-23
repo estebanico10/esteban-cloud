@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141d2e"/>
+      <stop offset="100%" stop-color="#090d14"/>
+    </linearGradient>
+    <linearGradient id="cloud" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#67e8f9"/>
+      <stop offset="52%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#2563eb" stop-opacity="0.18"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)" stroke="url(#rim)" stroke-width="5"/>
+  <path d="M74 176h104c21 0 38-16.5 38-37 0-19.2-14.6-35-33.5-36.8C176.2 77.6 154.5 60 128.5 60c-27.5 0-50.2 20-54.8 46.2C54.6 109.6 40 126.1 40 146c0 16.6 13.4 30 34 30z" fill="url(#cloud)"/>
+  <g fill="none" stroke="#0b0f18" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M96 122h56"/>
+    <path d="M138 108l14 14-14 14"/>
+    <path d="M160 148h-56"/>
+    <path d="M118 134l-14 14 14 14"/>
+  </g>
+</svg>

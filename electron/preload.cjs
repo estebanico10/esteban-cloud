@@ -1,0 +1,87 @@
+'use strict';
+
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('estebanCloud', {
+  getState: () => ipcRenderer.invoke('cloud:getState'),
+  updateSettings: (patch) => ipcRenderer.invoke('cloud:updateSettings', patch),
+  startServer: () => ipcRenderer.invoke('cloud:startServer'),
+  stopServer: () => ipcRenderer.invoke('cloud:stopServer'),
+
+  pickShareFolder: () => ipcRenderer.invoke('shares:pickFolder'),
+  addShare: (payload) => ipcRenderer.invoke('shares:add', payload),
+  updateShare: (id, patch) => ipcRenderer.invoke('shares:update', { id, patch }),
+  removeShare: (id) => ipcRenderer.invoke('shares:remove', id),
+  openLocalFolder: (folderPath) => ipcRenderer.invoke('shares:openLocal', folderPath),
+
+  generateKey: (payload) => ipcRenderer.invoke('keys:generate', payload),
+  pickSaveFolder: () => ipcRenderer.invoke('keys:pickSaveFolder'),
+  saveKeyToLocations: (payload) => ipcRenderer.invoke('keys:saveToLocations', payload),
+  copyText: (text) => ipcRenderer.invoke('keys:copyText', text),
+  revokeKey: (keyId) => ipcRenderer.invoke('keys:revoke', keyId),
+  deleteKey: (keyId) => ipcRenderer.invoke('keys:delete', keyId),
+
+  pickKeyFile: () => ipcRenderer.invoke('client:pickKeyFile'),
+  scanUsbKeys: () => ipcRenderer.invoke('client:scanUsbKeys'),
+  unlockAndConnect: (payload) => ipcRenderer.invoke('client:unlockAndConnect', payload),
+  disconnectClient: (sessionId) => ipcRenderer.invoke('client:disconnect', sessionId),
+  listRemoteFiles: (payload) => ipcRenderer.invoke('client:listFiles', payload),
+  createRemoteFolder: (payload) => ipcRenderer.invoke('client:mkdir', payload),
+  renameRemoteItem: (payload) => ipcRenderer.invoke('client:renameItem', payload),
+  deleteRemoteItem: (payload) => ipcRenderer.invoke('client:deleteItem', payload),
+  downloadRemoteFile: (payload) => ipcRenderer.invoke('client:downloadFile', payload),
+  uploadRemoteFiles: (payload) => ipcRenderer.invoke('client:uploadFiles', payload),
+  mountDrive: (payload) => ipcRenderer.invoke('client:mountDrive', payload),
+  unmountDrive: (driveLetter) => ipcRenderer.invoke('client:unmountDrive', driveLetter),
+  openDrive: (driveLetter) => ipcRenderer.invoke('client:openDrive', driveLetter),
+  removePeer: (id) => ipcRenderer.invoke('client:removePeer', id),
+
+  installDependencies: (opts) => ipcRenderer.invoke('system:installDependencies', opts),
+  launchTailscale: () => ipcRenderer.invoke('system:launchTailscale'),
+  openScriptsFolder: () => ipcRenderer.invoke('system:openScriptsFolder'),
+  pickKitInstaller: () => ipcRenderer.invoke('kit:pickInstaller'),
+  exportPendriveKit: (payload) => ipcRenderer.invoke('kit:exportToPendrive', payload),
+  openExternal: (url) => ipcRenderer.invoke('system:openExternal', url),
+  checkUpdates: () => ipcRenderer.invoke('updates:check'),
+  pushUpdateToConnectedPeers: () => ipcRenderer.invoke('updates:pushToConnectedPeers'),
+  downloadAndInstallUpdate: (candidate) => ipcRenderer.invoke('updates:downloadAndInstall', candidate),
+
+  getGlobalMetrics: (opts) => ipcRenderer.invoke('metrics:getGlobal', opts),
+  runDiskBenchmark: () => ipcRenderer.invoke('metrics:runDiskBenchmark'),
+  updateMetricThresholds: (patch) => ipcRenderer.invoke('metrics:updateThresholds', patch),
+
+  chatList: () => ipcRenderer.invoke('chat:list'),
+  chatCreate: (payload) => ipcRenderer.invoke('chat:create', payload),
+  chatDelete: (chatId) => ipcRenderer.invoke('chat:delete', chatId),
+  chatGetMessages: (chatId) => ipcRenderer.invoke('chat:getMessages', chatId),
+  chatPickAttachments: () => ipcRenderer.invoke('chat:pickAttachments'),
+  chatSendMessage: (payload) => ipcRenderer.invoke('chat:sendMessage', payload),
+  chatGetAttachmentDataUrl: (attachmentId) => ipcRenderer.invoke('chat:getAttachmentDataUrl', attachmentId),
+  chatDownloadAttachment: (payload) => ipcRenderer.invoke('chat:downloadAttachment', payload),
+  chatDeleteAttachment: (payload) => ipcRenderer.invoke('chat:deleteAttachment', payload),
+  chatDeleteMessage: (payload) => ipcRenderer.invoke('chat:deleteMessage', payload),
+
+  onChatEvent: (cb) => {
+    const handler = (_event, evt) => cb(evt);
+    ipcRenderer.on('cloud:chatEvent', handler);
+    return () => ipcRenderer.removeListener('cloud:chatEvent', handler);
+  },
+
+  onUpdateAvailable: (cb) => {
+    const handler = (_event, info) => cb(info);
+    ipcRenderer.on('cloud:updateAvailable', handler);
+    return () => ipcRenderer.removeListener('cloud:updateAvailable', handler);
+  },
+
+  onUpdateProgress: (cb) => {
+    const handler = (_event, progress) => cb(progress);
+    ipcRenderer.on('cloud:updateProgress', handler);
+    return () => ipcRenderer.removeListener('cloud:updateProgress', handler);
+  },
+
+  onLog: (cb) => {
+    const handler = (_event, entry) => cb(entry);
+    ipcRenderer.on('cloud:log', handler);
+    return () => ipcRenderer.removeListener('cloud:log', handler);
+  }
+});
