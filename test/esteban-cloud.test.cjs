@@ -449,3 +449,48 @@ test('github releases updater: parses release, follows 302 redirect, verifies SH
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('electron/main.cjs: syntax valid and background timer functions are in top-level module scope', () => {
+  const vm = require('node:vm');
+  const mainPath = path.join(__dirname, '..', 'electron', 'main.cjs');
+  const code = fs.readFileSync(mainPath, 'utf8');
+
+  // 1. Valid JS syntax check
+  new vm.Script(code, { filename: 'main.cjs' });
+
+  // 2. Verify critical functions called from top-level timers/callbacks are defined outside registerIpc()
+  const regStart = code.indexOf('function registerIpc()');
+  assert.ok(regStart > 0, 'registerIpc must exist');
+  let depth = 0;
+  let regEnd = -1;
+  for (let i = code.indexOf('{', regStart); i < code.length; i++) {
+    if (code[i] === '{') depth++;
+    else if (code[i] === '}') {
+      depth--;
+      if (depth === 0) {
+        regEnd = i;
+        break;
+      }
+    }
+  }
+  assert.ok(regEnd > regStart, 'registerIpc closing brace found');
+  const insideRegisterIpc = code.slice(regStart, regEnd + 1);
+
+  for (const fnName of [
+    'checkUpdatesCore',
+    'applyInstallerAndRestart',
+    'runAutoUpdateCycle',
+    'broadcastUpdateToAllMeshPeers',
+    'syncLocalReleaseToKitsAndMesh',
+    'collectGlobalMetrics'
+  ]) {
+    assert.ok(
+      !insideRegisterIpc.includes(`function ${fnName}`),
+      `${fnName} must NOT be nested inside registerIpc()`
+    );
+    assert.ok(
+      code.includes(`function ${fnName}`),
+      `${fnName} must be defined at top level in main.cjs`
+    );
+  }
+});

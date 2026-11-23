@@ -90,10 +90,11 @@ Actualización automática publicada por **Esteban Nicola** ([estebanico.com](ht
 }
 
 Write-Host "=== [6/6] Iniciando Esteban Cloud v$ver y anunciando en la malla Tailscale ===" -ForegroundColor Cyan
+$appExe = "$env:LOCALAPPDATA\Programs\Esteban Cloud\Esteban Cloud.exe"
 $lnk = "$env:USERPROFILE\Desktop\Esteban Cloud.lnk"
 if (Test-Path $lnk) {
   Start-Process explorer.exe -ArgumentList "`"$lnk`""
-} else {
-  Start-Process "$env:LOCALAPPDATA\Programs\Esteban Cloud\Esteban Cloud.exe"
+} elseif (Test-Path $appExe) {
+  Start-Process explorer.exe -ArgumentList "`"$appExe`""
 }
 Write-Host "Despliegue automatizado v$ver completado con éxito." -ForegroundColor Green

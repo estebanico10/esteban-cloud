@@ -45,6 +45,21 @@ let updateCheckInFlight = false;
 let stagedUpdate = null; // { version, fileName, installerExe, sha256, sourceLabel }
 const alertCooldowns = new Map(); // alertKey -> nextAllowedMs
 
+// Prevent any unexpected error from showing a blocking native Windows dialog box
+process.on('uncaughtException', (err) => {
+  try {
+    console.error('[EstebanCloud uncaughtException]', err);
+    if (typeof server !== 'undefined' && server && server.log) {
+      server.log('error', `Excepción controlada: ${err && err.message ? err.message : String(err)}`);
+    }
+  } catch {}
+});
+process.on('unhandledRejection', (reason) => {
+  try {
+    console.error('[EstebanCloud unhandledRejection]', reason);
+  } catch {}
+});
+
 const store = new ConfigStore();
 const chatStore = new ChatStore();
 
@@ -186,10 +201,15 @@ function showWindow() {
   mainWindow.setSkipTaskbar(false);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
+  try { mainWindow.moveTop(); } catch {}
   mainWindow.setAlwaysOnTop(true);
   mainWindow.focus();
-  mainWindow.setAlwaysOnTop(false);
   try { app.focus({ steal: true }); } catch {}
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setAlwaysOnTop(false);
+    }
+  }, 400);
 }
 
 function createWindow() {
@@ -199,7 +219,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 650,
     center: true,
-    show: true,
+    show: !process.argv.includes('--minimized'),
     backgroundColor: '#090d14',
     title: 'Esteban Cloud',
     icon: loadBrandNativeImage(256),
@@ -209,6 +229,12 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
+    }
+  });
+
+  mainWindow.once('ready-to-show', () => {
+    if (!process.argv.includes('--minimized')) {
+      showWindow();
     }
   });
 
@@ -765,6 +791,9 @@ function registerIpc() {
     }
   });
 
+  registerUpdatesMetricsAndChatIpc();
+}
+
 async function checkUpdatesCore({ priorityUrl } = {}) {
   const currentVersion = app.getVersion();
   const repo = String(store.data.updateGithubRepo || 'estebanico10/esteban-cloud').trim() || 'estebanico10/esteban-cloud';
@@ -1144,6 +1173,92 @@ async function syncLocalReleaseToKitsAndMesh() {
   }
 }
 
+// ===== GLOBAL METRICS & OVERLOAD ALERTS (TOP-LEVEL HELPERS) =====
+async function collectGlobalMetrics({ includeDiskBench = false, notifyOverload = false } = {}) {
+  const thresholds = { ...DEFAULT_THRESHOLDS, ...(store.data.metricThresholds || {}) };
+  const env = await checkEnvironment();
+  const rawLocal = await getLocalMetrics({ includeDiskBench, thresholds });
+  const localMetrics = normalizeMetricsShape(rawLocal);
+
+  const port = store.data.port || 4789;
+  const peers = (env.tailscale.peers || []).filter((p) => p.ip && p.os === 'windows');
+  const peerResults = await Promise.all(
+    peers.map(async (p) => {
+      const baseUrl = `http://${p.ip}:${port}`;
+      if (!p.online) {
+        return { nodeName: p.hostName || p.ip, ip: p.ip, online: false, latencyMs: null, version: '', metrics: null, error: 'Equipo apagado o sin Tailscale' };
+      }
+      const t0 = Date.now();
+      try {
+        const res = await httpJsonRequest(`${baseUrl}/api/metrics`, { timeout: 3500 });
+        const latencyMs = Date.now() - t0;
+        return {
+          nodeName: (res.data && res.data.nodeName) || p.hostName || p.ip,
+          ip: p.ip,
+          online: true,
+          latencyMs,
+          version: (res.data && res.data.version) || '',
+          metrics: normalizeMetricsShape(res.data && res.data.metrics),
+          error: ''
+        };
+      } catch (err) {
+        return {
+          nodeName: p.hostName || p.ip,
+          ip: p.ip,
+          online: true,
+          latencyMs: Date.now() - t0,
+          version: '',
+          metrics: null,
+          error: `Sin métricas remotas (actualiza ese equipo a v0.2.0+): ${err.message}`
+        };
+      }
+    })
+  );
+
+  const aggregated = aggregateGlobalMetrics(localMetrics, peerResults, env.tailscale);
+  if (aggregated.nodes && aggregated.nodes[0]) {
+    aggregated.nodes[0].ip = env.tailscale.ip || env.lanIp || '127.0.0.1';
+    aggregated.nodes[0].version = app.getVersion();
+    aggregated.nodes[0].latencyMs = 0;
+    aggregated.nodes[0].metrics = localMetrics;
+  }
+
+  if (notifyOverload && aggregated.busyNodes && aggregated.busyNodes.length > 0) {
+    const now = Date.now();
+    for (const bn of aggregated.busyNodes) {
+      const key = `${bn.nodeName}:${bn.busyReason}`;
+      const nextAllowed = alertCooldowns.get(key) || 0;
+      if (now >= nextAllowed) {
+        alertCooldowns.set(key, now + 5 * 60 * 1000);
+        sendWindowsNotification(`Alerta de carga en ${bn.nodeName}`, bn.busyReason);
+      }
+    }
+  }
+
+  return { ...aggregated, thresholds };
+}
+
+async function resolvePeerChatUrl(chat) {
+  if (!chat) return '';
+  if (chat.peerUrl && /^https?:\/\//i.test(chat.peerUrl)) return chat.peerUrl.replace(/\/$/, '');
+  if (!chat.peerNode) return '';
+  const env = await checkEnvironment();
+  const target = chat.peerNode.toLowerCase();
+  const port = store.data.port || 4789;
+  const tp = (env.tailscale.peers || []).find((p) => (p.hostName || '').toLowerCase() === target || (p.ip || '') === chat.peerNode);
+  if (tp && tp.ip) return `http://${tp.ip}:${port}`;
+  const sp = (store.data.savedPeers || []).find((p) => (p.nodeName || '').toLowerCase() === target);
+  if (sp && sp.tailscaleIp) return `http://${sp.tailscaleIp}:${sp.port || port}`;
+  return '';
+}
+
+async function resolveSelfUrl() {
+  const env = await checkEnvironment();
+  const port = server.boundPort || store.data.port || 4789;
+  return env.tailscale.ip ? `http://${env.tailscale.ip}:${port}` : (env.lanIp ? `http://${env.lanIp}:${port}` : '');
+}
+
+function registerUpdatesMetricsAndChatIpc() {
   ipcMain.handle('updates:check', async () => checkUpdatesCore());
 
   ipcMain.handle('updates:pushToConnectedPeers', async () => {
@@ -1187,72 +1302,6 @@ async function syncLocalReleaseToKitsAndMesh() {
     return applyInstallerAndRestart(installerExe);
   });
 
-  // ===== GLOBAL METRICS & OVERLOAD ALERTS =====
-  async function collectGlobalMetrics({ includeDiskBench = false, notifyOverload = false } = {}) {
-    const thresholds = { ...DEFAULT_THRESHOLDS, ...(store.data.metricThresholds || {}) };
-    const env = await checkEnvironment();
-    const rawLocal = await getLocalMetrics({ includeDiskBench, thresholds });
-    const localMetrics = normalizeMetricsShape(rawLocal);
-
-    const port = store.data.port || 4789;
-    const peers = (env.tailscale.peers || []).filter((p) => p.ip && p.os === 'windows');
-    const peerResults = await Promise.all(
-      peers.map(async (p) => {
-        const baseUrl = `http://${p.ip}:${port}`;
-        if (!p.online) {
-          return { nodeName: p.hostName || p.ip, ip: p.ip, online: false, latencyMs: null, version: '', metrics: null, error: 'Equipo apagado o sin Tailscale' };
-        }
-        const t0 = Date.now();
-        try {
-          const res = await httpJsonRequest(`${baseUrl}/api/metrics`, { timeout: 3500 });
-          const latencyMs = Date.now() - t0;
-          return {
-            nodeName: (res.data && res.data.nodeName) || p.hostName || p.ip,
-            ip: p.ip,
-            online: true,
-            latencyMs,
-            version: (res.data && res.data.version) || '',
-            metrics: normalizeMetricsShape(res.data && res.data.metrics),
-            error: ''
-          };
-        } catch (err) {
-          return {
-            nodeName: p.hostName || p.ip,
-            ip: p.ip,
-            online: true,
-            latencyMs: Date.now() - t0,
-            version: '',
-            metrics: null,
-            error: `Sin métricas remotas (actualiza ese equipo a v0.2.0): ${err.message}`
-          };
-        }
-      })
-    );
-
-    const aggregated = aggregateGlobalMetrics(localMetrics, peerResults, env.tailscale);
-    // Ensure local node carries local IP & version and normalized shape
-    if (aggregated.nodes && aggregated.nodes[0]) {
-      aggregated.nodes[0].ip = env.tailscale.ip || env.lanIp || '127.0.0.1';
-      aggregated.nodes[0].version = app.getVersion();
-      aggregated.nodes[0].latencyMs = 0;
-      aggregated.nodes[0].metrics = localMetrics;
-    }
-
-    if (notifyOverload && aggregated.busyNodes && aggregated.busyNodes.length > 0) {
-      const now = Date.now();
-      for (const bn of aggregated.busyNodes) {
-        const key = `${bn.nodeName}:${bn.busyReason}`;
-        const nextAllowed = alertCooldowns.get(key) || 0;
-        if (now >= nextAllowed) {
-          alertCooldowns.set(key, now + 5 * 60 * 1000);
-          sendWindowsNotification(`Alerta de carga en ${bn.nodeName}`, bn.busyReason);
-        }
-      }
-    }
-
-    return { ...aggregated, thresholds };
-  }
-
   ipcMain.handle('metrics:getGlobal', async (_e, opts) => {
     return collectGlobalMetrics({ includeDiskBench: Boolean(opts && opts.includeDiskBench), notifyOverload: false });
   });
@@ -1274,27 +1323,6 @@ async function syncLocalReleaseToKitsAndMesh() {
       collectGlobalMetrics({ includeDiskBench: false, notifyOverload: true }).catch(() => {});
     }
   }, 45 * 1000);
-
-  // ===== P2P CHAT & MESSAGING =====
-  async function resolvePeerChatUrl(chat) {
-    if (!chat) return '';
-    if (chat.peerUrl && /^https?:\/\//i.test(chat.peerUrl)) return chat.peerUrl.replace(/\/$/, '');
-    if (!chat.peerNode) return '';
-    const env = await checkEnvironment();
-    const target = chat.peerNode.toLowerCase();
-    const port = store.data.port || 4789;
-    const tp = (env.tailscale.peers || []).find((p) => (p.hostName || '').toLowerCase() === target || (p.ip || '') === chat.peerNode);
-    if (tp && tp.ip) return `http://${tp.ip}:${port}`;
-    const sp = (store.data.savedPeers || []).find((p) => (p.nodeName || '').toLowerCase() === target);
-    if (sp && sp.tailscaleIp) return `http://${sp.tailscaleIp}:${sp.port || port}`;
-    return '';
-  }
-
-  async function resolveSelfUrl() {
-    const env = await checkEnvironment();
-    const port = server.boundPort || store.data.port || 4789;
-    return env.tailscale.ip ? `http://${env.tailscale.ip}:${port}` : (env.lanIp ? `http://${env.lanIp}:${port}` : '');
-  }
 
   ipcMain.handle('chat:list', async () => {
     return { chats: chatStore.listChats(), totalUnread: chatStore.getTotalUnread() };
