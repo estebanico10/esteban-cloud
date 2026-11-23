@@ -7,10 +7,10 @@ const http = require('http');
 const https = require('https');
 const { spawn } = require('child_process');
 const { URL } = require('url');
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, nativeImage, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, Tray, Menu, nativeImage, Notification, powerSaveBlocker } = require('electron');
 const QRCode = require('qrcode');
 
-const { ConfigStore } = require('./config-store.cjs');
+const { ConfigStore, defaultConfigDir } = require('./config-store.cjs');
 const { generateKeyBundle, decryptKeyBundle } = require('./crypto-keys.cjs');
 const { EstebanCloudServer } = require('./server.cjs');
 const { checkEnvironment, MountManager, syncSshAuthorizedKeys, launchElevatedInstaller } = require('./system-tools.cjs');
@@ -31,6 +31,14 @@ const {
   runDiskSpeedBenchmark,
   aggregateGlobalMetrics
 } = require('./metrics.cjs');
+const {
+  scanAllAvailableKeys,
+  diagnosePeerConnection,
+  scanSharedStorage,
+  computeFileHashSummary,
+  runFolderSync,
+  ClipboardHistoryStore
+} = require('./tools.cjs');
 
 // Prevent duplicate instances competing for port 4789 (EADDRINUSE)
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -62,6 +70,8 @@ process.on('unhandledRejection', (reason) => {
 
 const store = new ConfigStore();
 const chatStore = new ChatStore();
+const clipboardStore = new ClipboardHistoryStore(path.join(defaultConfigDir(), 'clipboard-history.json'));
+let keepAwakeBlockerId = null;
 
 function normalizeMetricsShape(m) {
   if (!m) return null;
@@ -117,6 +127,11 @@ const server = new EstebanCloudServer(store, {
   getMetricsFn: async () => {
     const raw = await getLocalMetrics({ thresholds: store.data.metricThresholds || DEFAULT_THRESHOLDS });
     return normalizeMetricsShape(raw);
+  },
+  onClipboardPush: ({ text, senderNode }) => {
+    try { clipboard.writeText(text); } catch {}
+    clipboardStore.addItem({ text, senderNode: senderNode || 'Equipo remoto' });
+    sendWindowsNotification(`Portapapeles recibido de ${senderNode || 'Equipo remoto'}`, text.slice(0, 95));
   }
 });
 const mountManager = new MountManager({
@@ -337,6 +352,13 @@ async function buildFullState() {
   }
   const installerInfo = locateInstallerExe({ appRootDir: path.join(__dirname, '..'), extraDirs: usbInstallerDirs });
   const hostedUpdate = findLatestLocalRelease(getDefaultUpdateDirs(cfg.updateShareDir, path.join(__dirname, '..')));
+  const localKeysDir = path.join(defaultConfigDir(), 'keys');
+  const detectedKeys = scanAllAvailableKeys({
+    usbDrives: env.usbDrives || [],
+    extraDirs: [localKeysDir],
+    keyVault: cfg.keyVault || {},
+    authorizedKeys: cfg.keys || []
+  });
 
   return {
     appVersion: app.getVersion(),
@@ -344,6 +366,9 @@ async function buildFullState() {
     server: status,
     env,
     installerInfo,
+    detectedKeys,
+    clipboardHistory: clipboardStore.listItems(),
+    keepAwake: keepAwakeBlockerId !== null && powerSaveBlocker.isStarted(keepAwakeBlockerId),
     hostedUpdate: hostedUpdate ? {
       version: hostedUpdate.version,
       fileName: hostedUpdate.fileName,
@@ -446,12 +471,27 @@ function registerIpc() {
     };
     const result = generateKeyBundle({ label, permissions, shareIds, hostInfo, passphrase });
     store.addKeyRecord(result.hostRecord);
+    const suggestedFileName = `${String(label || 'llave').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${result.keyId}.ecloudkey`;
+    try {
+      const localKeysDir = path.join(defaultConfigDir(), 'keys');
+      fs.mkdirSync(localKeysDir, { recursive: true });
+      fs.writeFileSync(path.join(localKeysDir, suggestedFileName), result.bundleJson, 'utf8');
+      store.saveKeyVaultEntry({
+        keyId: result.keyId,
+        passphrase,
+        label,
+        nodeName: store.data.nodeName,
+        permissions,
+        shareIds,
+        fileName: suggestedFileName
+      });
+    } catch {}
     const sshSync = syncSshAuthorizedKeys(store.data.keys);
     return {
       keyId: result.keyId,
       bundleJson: result.bundleJson,
       clipboardString: result.clipboardString,
-      suggestedFileName: `${String(label || 'llave').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${result.keyId}.ecloudkey`,
+      suggestedFileName,
       sshSync,
       state: await buildFullState()
     };
@@ -573,6 +613,23 @@ function registerIpc() {
       raw = fs.readFileSync(filePath, 'utf8');
     }
     const payload = decryptKeyBundle(raw, passphrase);
+    try {
+      const localKeysDir = path.join(defaultConfigDir(), 'keys');
+      fs.mkdirSync(localKeysDir, { recursive: true });
+      const backupName = filePath ? path.basename(filePath) : `${String(payload.label || 'llave').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${payload.keyId}.ecloudkey`;
+      if (filePath && fs.existsSync(filePath)) {
+        fs.copyFileSync(filePath, path.join(localKeysDir, backupName));
+      }
+      store.saveKeyVaultEntry({
+        keyId: payload.keyId,
+        passphrase,
+        label: payload.label,
+        nodeName: (payload.host && payload.host.nodeName) || '',
+        permissions: payload.permissions || 'rw',
+        shareIds: payload.shareIds || ['*'],
+        fileName: backupName
+      });
+    } catch {}
     const { baseUrl, sharesResponse } = await resolveReachableBaseUrl(payload.host || {}, payload.token, overrideBaseUrl);
     const sessionId = `sess-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     clientSessions.set(sessionId, {
@@ -1522,6 +1579,149 @@ function registerUpdatesMetricsAndChatIpc() {
       }).catch(() => {});
     }
     return { messages: chatStore.getChat(chatId).messages, chats: chatStore.listChats() };
+  });
+
+  // ===== KEY VAULT & POWER TOOLS IPC =====
+  ipcMain.handle('keys:readClipboardText', async () => clipboard.readText());
+
+  ipcMain.handle('keys:savePassphrase', async (_e, { keyId, passphrase, label, nodeName }) => {
+    store.saveKeyVaultEntry({ keyId, passphrase, label, nodeName });
+    return buildFullState();
+  });
+
+  ipcMain.handle('keys:syncToAllUsb', async (_e, keyId) => {
+    const env = await checkEnvironment();
+    const localKeysDir = path.join(defaultConfigDir(), 'keys');
+    const allKeys = scanAllAvailableKeys({
+      usbDrives: env.usbDrives || [],
+      extraDirs: [localKeysDir],
+      keyVault: store.data.keyVault || {},
+      authorizedKeys: store.data.keys || []
+    });
+    const target = allKeys.find((k) => k.keyId === keyId);
+    if (!target || !target.bundleJson) {
+      throw new Error('No se encontró el archivo .ecloudkey de esta llave para sincronizar.');
+    }
+    const cleanFileName = target.fileName && target.fileName.endsWith('.ecloudkey')
+      ? target.fileName
+      : `${String(target.label || 'llave').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${target.keyId}.ecloudkey`;
+
+    const saved = [];
+    fs.mkdirSync(localKeysDir, { recursive: true });
+    const localDest = path.join(localKeysDir, cleanFileName);
+    fs.writeFileSync(localDest, target.bundleJson, 'utf8');
+    saved.push(localDest);
+
+    for (const d of (env.usbDrives || [])) {
+      const kitDir = path.join(d.root, 'Esteban-Cloud-Kit');
+      const targetDir = fs.existsSync(kitDir) ? kitDir : d.root;
+      try {
+        const dest = path.join(targetDir, cleanFileName);
+        fs.writeFileSync(dest, target.bundleJson, 'utf8');
+        saved.push(dest);
+      } catch {}
+    }
+    return { saved, state: await buildFullState() };
+  });
+
+  ipcMain.handle('tools:runFolderSync', async (_e, { id, label, sourceDir, targetDir, mirror, saveProfile }) => {
+    const result = await runFolderSync({ sourceDir, targetDir, mirror: Boolean(mirror) });
+    if (saveProfile || id) {
+      store.saveSyncProfile({ id, label, sourceDir, targetDir, mirror: Boolean(mirror), lastResult: result });
+    }
+    return { result, state: await buildFullState() };
+  });
+
+  ipcMain.handle('tools:deleteSyncProfile', async (_e, id) => {
+    store.removeSyncProfile(id);
+    return buildFullState();
+  });
+
+  ipcMain.handle('tools:pickFileForHash', async () => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Seleccionar archivo para verificar SHA-256 / MD5',
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths.length) return null;
+    return computeFileHashSummary(res.filePaths[0]);
+  });
+
+  ipcMain.handle('tools:computeFileHash', async (_e, filePath) => {
+    return computeFileHashSummary(filePath);
+  });
+
+  ipcMain.handle('tools:scanSharedStorage', async (_e, { query = '' } = {}) => {
+    return scanSharedStorage({ shares: store.data.shares || [], query });
+  });
+
+  ipcMain.handle('tools:diagnosePeer', async (_e, { host, port } = {}) => {
+    return diagnosePeerConnection({ host, port: Number(port) || store.data.port || 4789 });
+  });
+
+  ipcMain.handle('tools:launchRdp', async (_e, host) => {
+    const cleanHost = String(host || '').trim().replace(/[^a-zA-Z0-9._:-]/g, '');
+    if (!cleanHost) throw new Error('Dirección IP o host inválido.');
+    const child = spawn('mstsc.exe', [`/v:${cleanHost}`], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return { ok: true, host: cleanHost };
+  });
+
+  ipcMain.handle('tools:openSmbShare', async (_e, host) => {
+    const cleanHost = String(host || '').trim().replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!cleanHost) throw new Error('Dirección IP o host inválido.');
+    const unc = `\\\\${cleanHost}`;
+    const child = spawn('explorer.exe', [unc], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return { ok: true, unc };
+  });
+
+  ipcMain.handle('tools:pushMeshClipboard', async (_e, { text } = {}) => {
+    const cleanText = String(text || '');
+    if (!cleanText.trim()) throw new Error('El texto para enviar al portapapeles está vacío.');
+    try { clipboard.writeText(cleanText); } catch {}
+    clipboardStore.addItem({ text: cleanText, senderNode: store.data.nodeName });
+
+    const env = await checkEnvironment();
+    const port = store.data.port || 4789;
+    const targets = new Set();
+    for (const tp of (env.tailscale.peers || [])) {
+      if (tp.online && tp.ip && tp.os === 'windows') targets.add(`http://${tp.ip}:${port}`);
+    }
+    for (const sp of (store.data.savedPeers || [])) {
+      if (sp.tailscaleIp) targets.add(`http://${sp.tailscaleIp}:${sp.port || port}`);
+    }
+
+    const deliveredTo = [];
+    await Promise.all(Array.from(targets).map(async (baseUrl) => {
+      try {
+        const res = await httpJsonRequest(`${baseUrl}/api/tools/clipboard`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: cleanText, senderNode: store.data.nodeName }),
+          timeout: 3500
+        });
+        deliveredTo.push((res.data && res.data.nodeName) || baseUrl);
+      } catch {}
+    }));
+
+    return { deliveredTo, state: await buildFullState() };
+  });
+
+  ipcMain.handle('tools:deleteClipboardItem', async (_e, id) => {
+    clipboardStore.removeItem(id);
+    return buildFullState();
+  });
+
+  ipcMain.handle('tools:setKeepAwake', async (_e, enabled) => {
+    if (enabled) {
+      if (keepAwakeBlockerId === null || !powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
+        keepAwakeBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+      }
+    } else if (keepAwakeBlockerId !== null && powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
+      powerSaveBlocker.stop(keepAwakeBlockerId);
+      keepAwakeBlockerId = null;
+    }
+    return buildFullState();
   });
 }
 

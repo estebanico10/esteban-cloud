@@ -61,7 +61,9 @@ function createDefaultConfig() {
     sessionSecret: crypto.randomBytes(32).toString('hex'),
     shares: buildInitialShares(),
     keys: [],
-    savedPeers: []
+    savedPeers: [],
+    keyVault: {},
+    syncProfiles: []
   };
 }
 
@@ -82,7 +84,9 @@ class ConfigStore {
           ...parsed,
           shares: Array.isArray(parsed.shares) ? parsed.shares : defaults.shares,
           keys: Array.isArray(parsed.keys) ? parsed.keys : [],
-          savedPeers: Array.isArray(parsed.savedPeers) ? parsed.savedPeers : []
+          savedPeers: Array.isArray(parsed.savedPeers) ? parsed.savedPeers : [],
+          keyVault: (parsed.keyVault && typeof parsed.keyVault === 'object') ? parsed.keyVault : {},
+          syncProfiles: Array.isArray(parsed.syncProfiles) ? parsed.syncProfiles : []
         };
       }
     } catch {
@@ -217,6 +221,50 @@ class ConfigStore {
 
   removePeer(id) {
     this.data.savedPeers = this.data.savedPeers.filter((p) => p.id !== id);
+    this.save();
+    return true;
+  }
+
+  saveKeyVaultEntry({ keyId, passphrase, label, nodeName, permissions = 'rw', shareIds = ['*'], fileName = '' }) {
+    if (!keyId) throw new Error('keyId requerido.');
+    this.data.keyVault = this.data.keyVault || {};
+    const prev = this.data.keyVault[keyId] || {};
+    this.data.keyVault[keyId] = {
+      ...prev,
+      keyId: String(keyId).trim(),
+      label: String(label || prev.label || keyId).trim(),
+      nodeName: String(nodeName || prev.nodeName || '').trim(),
+      passphrase: passphrase !== undefined ? String(passphrase) : (prev.passphrase || ''),
+      permissions: permissions || prev.permissions || 'rw',
+      shareIds: Array.isArray(shareIds) ? shareIds : (prev.shareIds || ['*']),
+      fileName: String(fileName || prev.fileName || '').trim(),
+      updatedAt: new Date().toISOString()
+    };
+    this.save();
+    return this.data.keyVault[keyId];
+  }
+
+  saveSyncProfile({ id, label, sourceDir, targetDir, mirror = false, lastResult = null }) {
+    this.data.syncProfiles = Array.isArray(this.data.syncProfiles) ? this.data.syncProfiles : [];
+    const cleanId = id || `sync-${crypto.randomBytes(4).toString('hex')}`;
+    const entry = {
+      id: cleanId,
+      label: String(label || `${path.basename(sourceDir)} → ${path.basename(targetDir)}`).trim(),
+      sourceDir: String(sourceDir || '').trim(),
+      targetDir: String(targetDir || '').trim(),
+      mirror: Boolean(mirror),
+      lastResult,
+      updatedAt: new Date().toISOString()
+    };
+    const idx = this.data.syncProfiles.findIndex((p) => p.id === cleanId);
+    if (idx >= 0) this.data.syncProfiles[idx] = { ...this.data.syncProfiles[idx], ...entry };
+    else this.data.syncProfiles.unshift(entry);
+    this.save();
+    return entry;
+  }
+
+  removeSyncProfile(id) {
+    this.data.syncProfiles = (this.data.syncProfiles || []).filter((p) => p.id !== id);
     this.save();
     return true;
   }

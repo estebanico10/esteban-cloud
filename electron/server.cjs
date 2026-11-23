@@ -128,13 +128,14 @@ function isTrustedMeshIp(rawIp) {
 }
 
 class EstebanCloudServer {
-  constructor(configStore, { onLog, onUpdateNotice, chatStore, onChatEvent, getMetricsFn } = {}) {
+  constructor(configStore, { onLog, onUpdateNotice, chatStore, onChatEvent, getMetricsFn, onClipboardPush } = {}) {
     this.store = configStore;
     this.onLog = onLog || (() => {});
     this.onUpdateNotice = onUpdateNotice || null;
     this.chatStore = chatStore || null;
     this.onChatEvent = onChatEvent || null;
     this.getMetricsFn = getMetricsFn || null;
+    this.onClipboardPush = onClipboardPush || null;
     this.server = null;
     this.running = false;
     this.boundHost = null;
@@ -299,6 +300,22 @@ class EstebanCloudServer {
           version: PKG_VERSION,
           metrics: m
         });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tools/clipboard') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado para portapapeles en malla.' });
+        }
+        const body = await readJsonBody(req, 2 * 1024 * 1024);
+        const text = String(body.text || '');
+        const senderNode = String(body.senderNode || ip).trim();
+        if (!text.trim()) {
+          return sendJson(res, 400, { error: 'Texto vacío.' });
+        }
+        if (this.onClipboardPush) {
+          Promise.resolve(this.onClipboardPush({ text, senderNode })).catch(() => {});
+        }
+        return sendJson(res, 200, { ok: true, nodeName: this.store.data.nodeName });
       }
 
       if (pathname.startsWith('/api/chat/') && this.chatStore) {

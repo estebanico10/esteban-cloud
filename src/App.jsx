@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import MetricsView from './components/MetricsView.jsx';
 import ChatView from './components/ChatView.jsx';
+import ToolsView from './components/ToolsView.jsx';
 
 const api = window.estebanCloud;
 
@@ -99,10 +100,10 @@ export default function App() {
   const [busy, setBusy] = useState(false);
 
   // Key generator state
-  const [keyLabel, setKeyLabel] = useState('Pendrive Principal');
+  const [keyLabel, setKeyLabel] = useState('Esteban Total (Todas las carpetas)');
   const [keyPass, setKeyPass] = useState('');
   const [keyPass2, setKeyPass2] = useState('');
-  const [showKeyPass, setShowKeyPass] = useState(false);
+  const [showKeyPass, setShowKeyPass] = useState(true);
   const [keyPerm, setKeyPerm] = useState('rw');
   const [keyAllShares, setKeyAllShares] = useState(true);
   const [selectedShareIds, setSelectedShareIds] = useState([]);
@@ -114,7 +115,7 @@ export default function App() {
   const [bundleText, setBundleText] = useState('');
   const [bundleFilePath, setBundleFilePath] = useState('');
   const [clientPass, setClientPass] = useState('');
-  const [showClientPass, setShowClientPass] = useState(false);
+  const [showClientPass, setShowClientPass] = useState(true);
   const [overrideUrl, setOverrideUrl] = useState('');
   const [showAdvancedClient, setShowAdvancedClient] = useState(false);
   const [draggingKey, setDraggingKey] = useState(false);
@@ -344,6 +345,42 @@ export default function App() {
     }
   };
 
+  const handleQuickConnectKey = async (k) => {
+    if (!k) return;
+    const pass = k.passphrase || state?.config?.keyVault?.[k.keyId]?.passphrase || '';
+    const fPath = k.primaryPath || k.filePath || '';
+    const bText = k.bundleJson || '';
+    setTab('client');
+    setBundleFilePath(fPath);
+    setBundleText(fPath ? '' : bText);
+    setClientPass(pass);
+    if (!pass) {
+      flash('info', `Llave ${k.label || k.keyId} seleccionada. Escribe su clave y pulsa Conectar.`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api.unlockAndConnect({
+        bundleText: fPath ? '' : bText,
+        filePath: fPath,
+        passphrase: pass,
+        overrideBaseUrl: overrideUrl.trim() || undefined,
+        saveBookmark: true
+      });
+      setState(res.state);
+      setActiveSessionId(res.sessionId);
+      setActiveRemoteShare(null);
+      setRemotePath('');
+      setRemoteItems([]);
+      setRemoteSearch('');
+      flash('ok', `Conectado en 1 clic a ${res.session.nodeName} (${res.session.baseUrl}).`);
+    } catch (err) {
+      flash('error', err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const loadRemoteDir = async (sessionId, share, relPath) => {
     setBusy(true);
     try {
@@ -444,6 +481,10 @@ export default function App() {
             <MessageSquare size={17} /> Mensajería
             {unreadChats > 0 && <span className="pill-count" style={{ background: 'rgba(56,189,248,0.28)', color: '#e0f2fe' }}>{unreadChats}</span>}
           </button>
+          <button className={`nav-btn ${tab === 'tools' ? 'active' : ''}`} onClick={() => setTab('tools')}>
+            <Sparkles size={17} /> Herramientas y Claves
+            <span className="pill-count">{(state.detectedKeys || []).length || 5}</span>
+          </button>
           <button className={`nav-btn ${tab === 'deps' ? 'active' : ''}`} onClick={() => setTab('deps')}>
             <Wrench size={17} /> Instalador 1-clic
             {!depsReady && <span className="pill-count">!</span>}
@@ -456,7 +497,7 @@ export default function App() {
           </button>
           <button className={`nav-btn ${tab === 'keys' ? 'active' : ''}`} onClick={() => setTab('keys')}>
             <KeyRound size={17} /> Llaves y Pendrive
-            <span className="pill-count">{config.keys.filter((k) => !k.revoked).length}</span>
+            <span className="pill-count">{(state.detectedKeys || []).length || config.keys.filter((k) => !k.revoked).length}</span>
           </button>
           <button className={`nav-btn ${tab === 'kit' ? 'active' : ''}`} onClick={() => setTab('kit')}>
             <Package size={17} /> Kit Pendrive
@@ -730,6 +771,16 @@ export default function App() {
           <ChatView api={api} state={state} flash={flash} onUnreadChange={(n) => setUnreadChats(Number(n) || 0)} />
         )}
 
+        {tab === 'tools' && (
+          <ToolsView
+            api={api}
+            state={state}
+            flash={flash}
+            onQuickConnectKey={handleQuickConnectKey}
+            onOpenTab={setTab}
+          />
+        )}
+
         {tab === 'host' && (
           <>
             <div className="page-head">
@@ -949,49 +1000,122 @@ export default function App() {
             </div>
 
             <div className="card">
-              <h2>Llaves autorizadas en este equipo</h2>
-              {config.keys.length === 0 ? (
-                <p className="muted">Todavía no has creado ninguna llave.</p>
+              <div className="between" style={{ marginBottom: 12 }}>
+                <div>
+                  <h2><KeyRound size={17} color="#67e8f9" /> Bóveda Visible de Claves (Este equipo y Pendrives USB)</h2>
+                  <p className="muted" style={{ margin: '4px 0 0' }}>
+                    Aquí ves todas tus llaves Totales, sus claves/contraseñas en texto claro, dónde están guardadas y sus códigos portables.
+                  </p>
+                </div>
+                <button className="btn btn-sm" onClick={refresh}>
+                  <RefreshCw size={14} /> Actualizar llaves
+                </button>
+              </div>
+
+              {(state.detectedKeys || []).length === 0 && config.keys.length === 0 ? (
+                <p className="muted">Todavía no hay llaves registradas ni detectadas.</p>
               ) : (
                 <div className="list">
-                  {config.keys.map((k) => (
-                    <div key={k.keyId} className="list-item">
-                      <div>
-                        <div className="row">
-                          <strong>{k.label}</strong>
-                          <span className="mono muted">{k.keyId}</span>
-                          <span className={`badge ${k.revoked ? 'danger' : 'ok'}`}>{k.revoked ? 'Revocada' : 'Activa'}</span>
-                          <span className="badge accent">{k.permissions === 'rw' ? 'RW' : 'Solo lectura'}</span>
+                  {(state.detectedKeys || []).map((k) => {
+                    const visiblePass = k.passphrase || config.keyVault?.[k.keyId]?.passphrase || '';
+                    return (
+                      <div key={k.keyId} className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
+                        <div className="between" style={{ flexWrap: 'wrap', gap: 8 }}>
+                          <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                            <strong style={{ fontSize: 14.5 }}>{k.label}</strong>
+                            <span className="mono badge">{k.keyId}</span>
+                            <span className={`badge ${k.revoked ? 'danger' : 'ok'}`}>
+                              {k.revoked ? 'Revocada' : (k.isLocalHostKey ? 'Autorizada en este PC' : `Equipo: ${k.nodeName || 'Remoto'}`)}
+                            </span>
+                            <span className="badge accent">
+                              {k.isTotal !== false ? 'TOTAL · Todas las carpetas (RW)' : (k.permissions === 'rw' ? 'RW' : 'Solo lectura')}
+                            </span>
+                            {(k.tailscaleIp || k.lanIp) && (
+                              <span className="mono muted" style={{ fontSize: 12 }}>
+                                {k.tailscaleIp || k.lanIp}:{k.port || 4789}
+                              </span>
+                            )}
+                          </div>
+                          <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                            {k.primaryPath && (
+                              <button
+                                className="btn btn-sm btn-primary"
+                                onClick={() => handleQuickConnectKey(k)}
+                              >
+                                <Link2 size={13} /> Conectar en 1 clic
+                              </button>
+                            )}
+                            {k.clipboardString && (
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => { api.copyText(k.clipboardString); flash('ok', `Código ECLOUD1 de ${k.keyId} copiado.`); }}
+                              >
+                                <Copy size={13} /> Copiar ECLOUD1:
+                              </button>
+                            )}
+                            {k.bundleJson && (
+                              <button
+                                className="btn btn-sm"
+                                onClick={() => { api.copyText(k.bundleJson); flash('ok', `JSON .ecloudkey de ${k.keyId} copiado.`); }}
+                              >
+                                <Copy size={13} /> Copiar JSON
+                              </button>
+                            )}
+                            {k.bundleJson && (
+                              <button
+                                className="btn btn-sm"
+                                onClick={async () => {
+                                  try {
+                                    const res = await api.syncKeyToAllUsb(k.keyId);
+                                    setState(res.state);
+                                    flash('ok', `Llave ${k.keyId} sincronizada en: ${res.saved.join(' | ')}`);
+                                  } catch (err) {
+                                    flash('error', err.message);
+                                  }
+                                }}
+                              >
+                                <Usb size={13} /> Sincronizar a USBs
+                              </button>
+                            )}
+                            {k.isLocalHostKey && !k.revoked && (
+                              <button
+                                className="btn btn-sm btn-danger"
+                                onClick={async () => {
+                                  setState(await api.revokeKey(k.keyId));
+                                  flash('ok', `Llave ${k.keyId} revocada al instante.`);
+                                }}
+                              >
+                                <ShieldAlert size={13} /> Revocar
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        <div className="muted" style={{ marginTop: 4 }}>
-                          Creada: {new Date(k.createdAt).toLocaleString()} {k.lastUsedAt ? `· Último uso: ${new Date(k.lastUsedAt).toLocaleString()}` : '· Sin uso todavía'}
+
+                        <div className="between" style={{ flexWrap: 'wrap', gap: 10, background: 'rgba(15, 23, 42, 0.55)', padding: '8px 12px', borderRadius: 8, border: '1px solid rgba(56, 189, 248, 0.18)' }}>
+                          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                            <span className="muted" style={{ fontSize: 12 }}>Clave / Contraseña:</span>
+                            <code className="mono" style={{ fontSize: 13.5, color: '#67e8f9', fontWeight: 700, background: 'rgba(8, 47, 73, 0.55)', padding: '3px 8px', borderRadius: 6 }}>
+                              {visiblePass || '(sin clave guardada)'}
+                            </code>
+                            {visiblePass && (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                onClick={() => { api.copyText(visiblePass); flash('ok', `Clave de ${k.keyId} copiada al portapapeles.`); }}
+                              >
+                                <Copy size={12} /> Copiar clave
+                              </button>
+                            )}
+                          </div>
+                          {k.locations && k.locations.length > 0 && (
+                            <div className="muted mono" style={{ fontSize: 11.5 }}>
+                              Archivos: {k.locations.join(' · ')}
+                            </div>
+                          )}
                         </div>
                       </div>
-                      <div className="row">
-                        {!k.revoked && (
-                          <button
-                            className="btn btn-sm btn-danger"
-                            onClick={async () => {
-                              setState(await api.revokeKey(k.keyId));
-                              flash('ok', `Llave ${k.keyId} revocada al instante.`);
-                            }}
-                          >
-                            <ShieldAlert size={14} /> Revocar
-                          </button>
-                        )}
-                        <button
-                          className="btn btn-sm"
-                          title="Eliminar registro"
-                          onClick={async () => {
-                            setState(await api.deleteKey(k.keyId));
-                            flash('ok', `Registro de llave ${k.keyId} eliminado.`);
-                          }}
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -1187,23 +1311,67 @@ export default function App() {
               </div>
             </div>
 
-            {usbKeys.length > 0 && (
+            {((state.detectedKeys && state.detectedKeys.length > 0) || usbKeys.length > 0) && (
               <div className="card">
-                <h3>Llaves detectadas en pendrives USB</h3>
-                <div className="row">
-                  {usbKeys.map((uk) => (
-                    <button
-                      key={uk.filePath}
-                      className="btn btn-sm"
-                      onClick={() => {
-                        setBundleFilePath(uk.filePath);
-                        setBundleText('');
-                        flash('ok', `Seleccionada: ${uk.filePath}`);
-                      }}
-                    >
-                      <KeyRound size={14} /> {uk.drive} {uk.fileName}
-                    </button>
-                  ))}
+                <div className="between" style={{ marginBottom: 10 }}>
+                  <h3><KeyRound size={16} color="#67e8f9" /> Llaves Totales y Claves disponibles (Conexión en 1 clic)</h3>
+                  <span className="badge accent">Auto-relleno de clave activo</span>
+                </div>
+                <div className="list">
+                  {(state.detectedKeys || []).map((dk) => {
+                    const savedPass = dk.passphrase || config.keyVault?.[dk.keyId]?.passphrase || '';
+                    return (
+                      <div key={dk.keyId} className="list-item" style={{ flexWrap: 'wrap', gap: 10 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+                            <strong>{dk.label}</strong>
+                            <span className="mono badge">{dk.keyId}</span>
+                            <span className="badge ok">Equipo: {dk.nodeName || 'Nodo'}</span>
+                            <span className="badge accent">TOTAL · RW</span>
+                          </div>
+                          <div className="row" style={{ marginTop: 6, flexWrap: 'wrap', gap: 10 }}>
+                            <span className="muted" style={{ fontSize: 12 }}>
+                              Clave: <strong className="mono" style={{ color: '#67e8f9' }}>{savedPass || '(sin clave guardada)'}</strong>
+                            </span>
+                            {dk.primaryPath && (
+                              <span className="muted mono" style={{ fontSize: 11.5 }}>{dk.primaryPath}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="row" style={{ gap: 6 }}>
+                          {savedPass && (
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              onClick={() => { api.copyText(savedPass); flash('ok', `Clave ${savedPass} copiada.`); }}
+                            >
+                              <Copy size={13} /> Copiar clave
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => {
+                              setBundleFilePath(dk.primaryPath || '');
+                              setBundleText(dk.primaryPath ? '' : (dk.bundleJson || ''));
+                              if (savedPass) setClientPass(savedPass);
+                              flash('ok', `Llave y clave de ${dk.nodeName || dk.label} cargadas en el formulario.`);
+                            }}
+                          >
+                            Rellenar formulario
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-primary"
+                            disabled={busy}
+                            onClick={() => handleQuickConnectKey(dk)}
+                          >
+                            <Link2 size={13} /> Conectar en 1 clic
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1331,14 +1499,21 @@ export default function App() {
                           <div className="row">
                             {peer.keyFilePath && (
                               <button
-                                className="btn btn-sm"
+                                className="btn btn-sm btn-primary"
                                 onClick={() => {
-                                  setBundleFilePath(peer.keyFilePath);
-                                  setBundleText('');
-                                  flash('info', `Llave seleccionada (${peer.keyFilePath}). Ingresa la frase de paso y pulsa Conectar.`);
+                                  const dk = (state.detectedKeys || []).find((k) => k.keyId === peer.keyId);
+                                  const savedPass = dk?.passphrase || config.keyVault?.[peer.keyId]?.passphrase || '';
+                                  handleQuickConnectKey({
+                                    keyId: peer.keyId,
+                                    label: peer.label,
+                                    nodeName: peer.nodeName,
+                                    primaryPath: dk?.primaryPath || peer.keyFilePath,
+                                    bundleJson: dk?.bundleJson || '',
+                                    passphrase: savedPass
+                                  });
                                 }}
                               >
-                                Usar
+                                <Link2 size={13} /> Conectar 1-clic
                               </button>
                             )}
                             <button

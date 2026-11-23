@@ -91,10 +91,16 @@ Actualización automática publicada por **Esteban Nicola** ([estebanico.com](ht
 
 Write-Host "=== [6/6] Iniciando Esteban Cloud v$ver y anunciando en la malla Tailscale ===" -ForegroundColor Cyan
 $appExe = "$env:LOCALAPPDATA\Programs\Esteban Cloud\Esteban Cloud.exe"
-$lnk = "$env:USERPROFILE\Desktop\Esteban Cloud.lnk"
-if (Test-Path $lnk) {
-  Start-Process explorer.exe -ArgumentList "`"$lnk`""
-} elseif (Test-Path $appExe) {
-  Start-Process explorer.exe -ArgumentList "`"$appExe`""
+if (Test-Path $appExe) {
+  try {
+    $action = New-ScheduledTaskAction -Execute $appExe -WorkingDirectory (Split-Path -Parent $appExe)
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName "EstebanCloud_InteractiveLaunch" -Action $action -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName "EstebanCloud_InteractiveLaunch"
+    Start-Sleep -Seconds 2
+    Unregister-ScheduledTask -TaskName "EstebanCloud_InteractiveLaunch" -Confirm:$false -ErrorAction SilentlyContinue
+  } catch {
+    Start-Process $appExe
+  }
 }
 Write-Host "Despliegue automatizado v$ver completado con éxito." -ForegroundColor Green
