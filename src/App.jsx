@@ -699,9 +699,9 @@ export default function App() {
 
             <div className="grid-2">
               <div className="card">
-                <h2><Smartphone size={17} /> Acceso móvil Android / PWA (dentro del túnel)</h2>
+                <h2><Smartphone size={17} /> App Nativa Android (APK) y Super-App Móvil</h2>
                 <p className="muted">
-                  Abre la dirección en Chrome de tu celular (con Tailscale encendido fuera de casa, o Wi-Fi en casa), carga tu <code>.ecloudkey</code> y pulsa <strong>Agregar a pantalla de inicio</strong>.
+                  Escanea el QR con tu celular para abrir la Super-App móvil (Archivos, AirDrop, Pantalla Remota, Chat, Portapapeles y Bóveda) o descargar e instalar el <strong>APK nativo de Android (<code>Esteban-Cloud-0.4.0.apk</code>)</strong>.
                 </p>
                 {urls.tailscaleUrl ? (
                   <div className="qr-card">
@@ -709,9 +709,14 @@ export default function App() {
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <span className="badge ok">Global · Tailscale</span>
                       <div className="mono" style={{ margin: '6px 0', wordBreak: 'break-all' }}>{urls.tailscaleUrl}</div>
-                      <button className="btn btn-sm" onClick={() => { api.copyText(urls.tailscaleUrl); flash('ok', 'URL de Tailscale copiada.'); }}>
-                        <Copy size={13} /> Copiar URL
-                      </button>
+                      <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                        <button className="btn btn-sm" onClick={() => { api.copyText(urls.tailscaleUrl); flash('ok', 'URL de Tailscale copiada.'); }}>
+                          <Copy size={13} /> Copiar URL
+                        </button>
+                        <button className="btn btn-sm btn-primary" onClick={() => { api.copyText(`${urls.tailscaleUrl}/api/mobile/apk`); flash('ok', 'Enlace directo del APK por Tailscale copiado.'); }}>
+                          <Download size={13} /> Copiar link APK
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -726,9 +731,14 @@ export default function App() {
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <span className="badge accent">Red local · Wi-Fi</span>
                       <div className="mono" style={{ margin: '6px 0', wordBreak: 'break-all' }}>{urls.lanUrl}</div>
-                      <button className="btn btn-sm" onClick={() => { api.copyText(urls.lanUrl); flash('ok', 'URL LAN copiada.'); }}>
-                        <Copy size={13} /> Copiar URL
-                      </button>
+                      <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                        <button className="btn btn-sm" onClick={() => { api.copyText(urls.lanUrl); flash('ok', 'URL LAN copiada.'); }}>
+                          <Copy size={13} /> Copiar URL
+                        </button>
+                        <button className="btn btn-sm btn-primary" onClick={() => { api.copyText(`${urls.lanUrl}/api/mobile/apk`); flash('ok', 'Enlace directo del APK por Wi-Fi copiado.'); }}>
+                          <Download size={13} /> Copiar link APK (Wi-Fi)
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}

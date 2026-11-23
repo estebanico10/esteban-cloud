@@ -15,7 +15,12 @@ const {
   scanSharedStorage,
   computeFileHashSummary,
   runFolderSync,
-  ClipboardHistoryStore
+  ClipboardHistoryStore,
+  buildWakeOnLanPacket,
+  saveAirDropFile,
+  EncryptedVaultStore,
+  encryptFileForUsb,
+  decryptFileFromUsb
 } = require('../electron/tools.cjs');
 
 test('scanAllAvailableKeys discovers .ecloudkey bundles on USB/extraDirs and enriches from keyVault/authorizedKeys', () => {
@@ -248,6 +253,178 @@ test('runFolderSync performs incremental sync and mirror deletion, and Clipboard
 
     storeReloaded.removeItem(item1.id);
     assert.equal(storeReloaded.listItems().length, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('buildWakeOnLanPacket builds a valid 102-byte Magic Packet and rejects invalid MAC addresses', () => {
+  const pkt = buildWakeOnLanPacket('AA:BB:CC:DD:EE:FF');
+  assert.ok(Buffer.isBuffer(pkt));
+  assert.equal(pkt.length, 102);
+
+  // First 6 bytes must be 0xFF
+  for (let i = 0; i < 6; i += 1) {
+    assert.equal(pkt[i], 0xff);
+  }
+
+  // Next 16 repetitions of 6 bytes must equal AA BB CC DD EE FF
+  const expectedMac = Buffer.from('AABBCCDDEEFF', 'hex');
+  for (let rep = 0; rep < 16; rep += 1) {
+    const slice = pkt.subarray(6 + rep * 6, 6 + (rep + 1) * 6);
+    assert.deepEqual(slice, expectedMac);
+  }
+
+  // Dash-separated format also works
+  const pktDash = buildWakeOnLanPacket('11-22-33-44-55-66');
+  assert.equal(pktDash.length, 102);
+
+  assert.throws(() => buildWakeOnLanPacket('invalid-mac'), /MAC/i);
+});
+
+test('saveAirDropFile writes base64 payload and avoids filename collisions with -(1)', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecloud-airdrop-test-'));
+  try {
+    const payload1 = Buffer.from('Contenido AirDrop 1', 'utf8');
+    const payload2 = Buffer.from('Contenido AirDrop 2 distinto', 'utf8');
+
+    const res1 = saveAirDropFile({
+      fileName: '../reporte.txt',
+      dataBase64: payload1.toString('base64'),
+      senderNode: 'EstebanPcDELL',
+      targetDir: tmpDir
+    });
+
+    assert.equal(res1.ok, true);
+    assert.equal(res1.fileName, 'reporte.txt');
+    assert.equal(res1.size, payload1.length);
+    assert.equal(res1.senderNode, 'EstebanPcDELL');
+    assert.deepEqual(fs.readFileSync(res1.savedPath), payload1);
+
+    // Second file with same name should be saved as reporte-(1).txt
+    const res2 = saveAirDropFile({
+      fileName: 'reporte.txt',
+      dataBase64: `data:text/plain;base64,${payload2.toString('base64')}`,
+      senderNode: 'Celular',
+      targetDir: tmpDir
+    });
+
+    assert.equal(res2.ok, true);
+    assert.equal(res2.fileName, 'reporte-(1).txt');
+    assert.equal(res2.size, payload2.length);
+    assert.deepEqual(fs.readFileSync(res2.savedPath), payload2);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('EncryptedVaultStore encrypts secrets and notes at rest with AES-256-GCM and supports CRUD + P2P sync', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecloud-vault-test-'));
+  try {
+    const vaultFile = path.join(tmpDir, 'secret-vault.json');
+    const vault = new EncryptedVaultStore(vaultFile);
+
+    const created = vault.upsertItem({
+      title: 'Licencia Windows 11 Pro',
+      category: 'license',
+      username: 'esteban@visualcorp.com',
+      secret: 'XXXXX-YYYYY-ZZZZZ-12345',
+      notes: 'Nota super confidencial en bóveda'
+    });
+
+    assert.ok(created.id);
+    assert.equal(created.title, 'Licencia Windows 11 Pro');
+    assert.equal(created.secret, 'XXXXX-YYYYY-ZZZZZ-12345');
+
+    // Verify on-disk file does NOT contain plaintext secret or notes
+    const rawDiskText = fs.readFileSync(vaultFile, 'utf8');
+    assert.equal(rawDiskText.includes('XXXXX-YYYYY-ZZZZZ-12345'), false);
+    assert.equal(rawDiskText.includes('Nota super confidencial en bóveda'), false);
+    assert.equal(rawDiskText.includes('ECVAULT1:'), true);
+
+    // Reload from disk and verify listItems decrypts accurately
+    const reloaded = new EncryptedVaultStore(vaultFile);
+    const items = reloaded.listItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].id, created.id);
+    assert.equal(items[0].secret, 'XXXXX-YYYYY-ZZZZZ-12345');
+    assert.equal(items[0].notes, 'Nota super confidencial en bóveda');
+
+    // Update existing item
+    reloaded.upsertItem({
+      id: created.id,
+      title: 'Licencia Windows 11 Enterprise',
+      category: 'license',
+      username: 'esteban@visualcorp.com',
+      secret: 'NUEVO-SERIAL-99999',
+      notes: 'Actualizada'
+    });
+    assert.equal(reloaded.listItems().length, 1);
+    assert.equal(reloaded.listItems()[0].secret, 'NUEVO-SERIAL-99999');
+
+    // Test exportEncryptedJson & importEncryptedJson into second vault instance
+    const exportedJson = reloaded.exportEncryptedJson();
+    const peerVault = new EncryptedVaultStore(path.join(tmpDir, 'peer-vault.json'));
+    const importRes = peerVault.importEncryptedJson(exportedJson);
+    assert.equal(importRes.ok, true);
+    assert.equal(importRes.mergedCount, 1);
+    assert.equal(peerVault.listItems()[0].secret, 'NUEVO-SERIAL-99999');
+
+    // Delete item
+    reloaded.deleteItem(created.id);
+    assert.equal(reloaded.listItems().length, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('encryptFileForUsb and decryptFileFromUsb round-trip a file and reject wrong passphrases', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecloud-usbcrypto-test-'));
+  try {
+    const srcFile = path.join(tmpDir, 'contrato-privado.txt');
+    const encFile = path.join(tmpDir, 'contrato-privado.txt.ecloudenc');
+    const decFile = path.join(tmpDir, 'contrato-restaurado.txt');
+    const originalData = Buffer.from(
+      'Contrato confidencial de Esteban Cloud cifrado con PBKDF2 + AES-256-GCM.',
+      'utf8'
+    );
+    fs.writeFileSync(srcFile, originalData);
+
+    const encRes = encryptFileForUsb({
+      filePath: srcFile,
+      passphrase: 'Clave-USB-Segura-2026',
+      outputPath: encFile
+    });
+    assert.equal(encRes.ok, true);
+    assert.equal(encRes.outputPath, encFile);
+    assert.ok(fs.existsSync(encFile));
+
+    // Verify encrypted file starts with magic header ECENC1 and hides plaintext
+    const rawEncrypted = fs.readFileSync(encFile);
+    assert.equal(rawEncrypted.subarray(0, 6).toString('ascii'), 'ECENC1');
+    assert.equal(rawEncrypted.includes(Buffer.from('Contrato confidencial')), false);
+
+    // Wrong passphrase must fail authentication tag verification
+    assert.throws(
+      () =>
+        decryptFileFromUsb({
+          filePath: encFile,
+          passphrase: 'Clave-Incorrecta-000',
+          outputPath: decFile
+        }),
+      /contraseña|incorrecta|alterado/i
+    );
+
+    // Correct passphrase restores exact original bytes
+    const decRes = decryptFileFromUsb({
+      filePath: encFile,
+      passphrase: 'Clave-USB-Segura-2026',
+      outputPath: decFile
+    });
+    assert.equal(decRes.ok, true);
+    assert.equal(decRes.outputPath, decFile);
+    assert.equal(decRes.size, originalData.length);
+    assert.deepEqual(fs.readFileSync(decFile), originalData);
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

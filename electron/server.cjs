@@ -128,7 +128,23 @@ function isTrustedMeshIp(rawIp) {
 }
 
 class EstebanCloudServer {
-  constructor(configStore, { onLog, onUpdateNotice, chatStore, onChatEvent, getMetricsFn, onClipboardPush } = {}) {
+  constructor(configStore, {
+    onLog,
+    onUpdateNotice,
+    chatStore,
+    onChatEvent,
+    getMetricsFn,
+    onClipboardPush,
+    getClipboardItemsFn,
+    onAirDropReceive,
+    onScreenCapture,
+    onListProcesses,
+    onKillProcess,
+    onSystemAction,
+    onVaultList,
+    onVaultUpsert,
+    onVaultDelete
+  } = {}) {
     this.store = configStore;
     this.onLog = onLog || (() => {});
     this.onUpdateNotice = onUpdateNotice || null;
@@ -136,6 +152,15 @@ class EstebanCloudServer {
     this.onChatEvent = onChatEvent || null;
     this.getMetricsFn = getMetricsFn || null;
     this.onClipboardPush = onClipboardPush || null;
+    this.getClipboardItemsFn = getClipboardItemsFn || null;
+    this.onAirDropReceive = onAirDropReceive || null;
+    this.onScreenCapture = onScreenCapture || null;
+    this.onListProcesses = onListProcesses || null;
+    this.onKillProcess = onKillProcess || null;
+    this.onSystemAction = onSystemAction || null;
+    this.onVaultList = onVaultList || null;
+    this.onVaultUpsert = onVaultUpsert || null;
+    this.onVaultDelete = onVaultDelete || null;
     this.server = null;
     this.running = false;
     this.boundHost = null;
@@ -316,6 +341,187 @@ class EstebanCloudServer {
           Promise.resolve(this.onClipboardPush({ text, senderNode })).catch(() => {});
         }
         return sendJson(res, 200, { ok: true, nodeName: this.store.data.nodeName });
+      }
+
+      if (req.method === 'GET' && pathname === '/api/tools/clipboard') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const items = this.getClipboardItemsFn ? await this.getClipboardItemsFn() : [];
+        return sendJson(res, 200, { ok: true, items });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tools/airdrop') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado para AirDrop.' });
+        }
+        const body = await readJsonBody(req, 64 * 1024 * 1024);
+        if (!this.onAirDropReceive) {
+          return sendJson(res, 503, { error: 'AirDrop no configurado.' });
+        }
+        const saved = await this.onAirDropReceive({
+          fileName: body.fileName || 'archivo',
+          dataBase64: body.dataBase64 || '',
+          senderNode: body.senderNode || ip
+        });
+        return sendJson(res, 201, { ok: true, ...saved });
+      }
+
+      if (req.method === 'GET' && pathname === '/api/tools/screen') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado para pantalla remota.' });
+        }
+        if (!this.onScreenCapture) {
+          return sendJson(res, 503, { error: 'Captura de pantalla no disponible.' });
+        }
+        const snap = await this.onScreenCapture();
+        return sendJson(res, 200, { ok: true, nodeName: this.store.data.nodeName, ...snap });
+      }
+
+      if (req.method === 'GET' && pathname === '/api/tools/processes') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const processes = this.onListProcesses ? await this.onListProcesses() : [];
+        return sendJson(res, 200, { ok: true, nodeName: this.store.data.nodeName, processes });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tools/kill-process') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const body = await readJsonBody(req);
+        if (!this.onKillProcess) return sendJson(res, 503, { error: 'No disponible.' });
+        const result = await this.onKillProcess(body.pid);
+        return sendJson(res, 200, { ok: true, ...result });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/tools/action') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const body = await readJsonBody(req);
+        if (!this.onSystemAction) return sendJson(res, 503, { error: 'No disponible.' });
+        const result = await this.onSystemAction(body.action, body.payload || {});
+        return sendJson(res, 200, { ok: true, ...result });
+      }
+
+      if (pathname === '/api/tools/vault') {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado para bóveda.' });
+        }
+        if (req.method === 'GET') {
+          const items = this.onVaultList ? await this.onVaultList() : [];
+          return sendJson(res, 200, { ok: true, items });
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          const item = this.onVaultUpsert ? await this.onVaultUpsert(body) : null;
+          return sendJson(res, 201, { ok: true, item });
+        }
+        if (req.method === 'DELETE') {
+          const id = urlObj.searchParams.get('id');
+          if (this.onVaultDelete) await this.onVaultDelete(id);
+          return sendJson(res, 200, { ok: true });
+        }
+      }
+
+      if (pathname === '/api/mobile/chats' && this.chatStore) {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const chats = this.chatStore.listChats();
+        const chatId = urlObj.searchParams.get('chatId') || (chats[0] && chats[0].id) || '';
+        const messages = chatId ? (this.chatStore.getChat(chatId).messages || []) : [];
+        return sendJson(res, 200, { ok: true, nodeName: this.store.data.nodeName, chats, activeChatId: chatId, messages });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/mobile/chat-send' && this.chatStore) {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado.' });
+        }
+        const body = await readJsonBody(req, 32 * 1024 * 1024);
+        let chatId = body.chatId;
+        if (!chatId) {
+          const existing = this.chatStore.listChats()[0];
+          if (existing) chatId = existing.id;
+          else {
+            const created = this.chatStore.createChat({ title: 'Chat Móvil Android', type: 'group' });
+            chatId = created.id;
+          }
+        }
+        const savedAttachments = [];
+        for (const att of (body.attachments || [])) {
+          if (att && att.base64) {
+            const saved = this.chatStore.saveAttachment({
+              fileName: att.name || 'foto.jpg',
+              mime: att.mime || 'application/octet-stream',
+              buffer: Buffer.from(att.base64, 'base64')
+            });
+            savedAttachments.push(saved);
+          }
+        }
+        const senderNode = String(body.senderNode || 'Android Móvil').trim();
+        const msg = this.chatStore.addMessage({
+          chatId,
+          chatTitle: 'Chat Móvil Android',
+          senderNode,
+          text: body.text || '',
+          format: 'markdown',
+          attachments: savedAttachments,
+          incoming: true
+        });
+        if (this.onChatEvent) {
+          Promise.resolve(this.onChatEvent({ type: 'incoming-message', chatId, message: msg, senderNode })).catch(() => {});
+        }
+        return sendJson(res, 201, { ok: true, message: msg });
+      }
+
+      if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/api/mobile/apk') {
+        const candidateDirs = [
+          ...getDefaultUpdateDirs(this.store.data.updateShareDir, path.join(__dirname, '..')),
+          'E:\\Esteban-Cloud-Kit',
+          'F:\\Esteban-Cloud-Kit'
+        ];
+        let apkPath = '';
+        for (const d of candidateDirs) {
+          try {
+            if (!fs.existsSync(d)) continue;
+            const files = fs.readdirSync(d).filter((f) => /^Esteban-Cloud.*\.apk$/i.test(f)).sort().reverse();
+            if (files.length > 0) {
+              apkPath = path.join(d, files[0]);
+              break;
+            }
+          } catch {}
+        }
+        if (!apkPath || !fs.existsSync(apkPath)) {
+          return sendJson(res, 404, { error: 'Archivo APK no encontrado en este nodo.' });
+        }
+        const st = fs.statSync(apkPath);
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.android.package-archive',
+          'Content-Length': st.size,
+          'Content-Disposition': `attachment; filename="${path.basename(apkPath)}"`
+        });
+        if (req.method === 'HEAD') return res.end();
+        return fs.createReadStream(apkPath).pipe(res);
+      }
+
+      if (req.method === 'POST' && pathname === '/api/auth/quick-mesh-unlock') {
+        if (!isTrustedMeshIp(ip)) {
+          return sendJson(res, 403, { error: 'Desbloqueo rápido permitido solo dentro de tu red Tailscale o Wi-Fi local.' });
+        }
+        const keyRecord = (this.store.data.keys || []).find((k) => !k.revoked);
+        if (!keyRecord) {
+          return sendJson(res, 404, { error: 'No hay ninguna llave activa en este equipo.' });
+        }
+        this.store.touchKeyUsed(keyRecord.keyId);
+        const cookie = this.createSessionCookie(keyRecord);
+        return sendJson(res, 200, {
+          ok: true,
+          key: { keyId: keyRecord.keyId, label: keyRecord.label, permissions: keyRecord.permissions },
+          shares: this.getAuthorizedShares(keyRecord)
+        }, { 'Set-Cookie': cookie });
       }
 
       if (pathname.startsWith('/api/chat/') && this.chatStore) {

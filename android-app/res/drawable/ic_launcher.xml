@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Dark rounded background #0D1117 -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M5,1h14c2.21,0 4,1.79 4,4v14c0,2.21 -1.79,4 -4,4H5c-2.21,0 -4,-1.79 -4,-4V5c0,-2.21 1.79,-4 4,-4z" />
+    <!-- Cyan outer border glow -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="0.6"
+        android:fillColor="#00000000"
+        android:pathData="M5,1.5h14c1.93,0 3.5,1.57 3.5,3.5v14c0,1.93 -1.57,3.5 -3.5,3.5H5c-1.93,0 -3.5,-1.57 -3.5,-3.5V5c0,-1.93 1.57,-3.5 3.5,-3.5z" />
+    <!-- Cyan Cloud #38BDF8 -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M18.5,17.5H6.8c-1.82,0 -3.3,-1.48 -3.3,-3.3c0,-1.65 1.21,-3.01 2.8,-3.25C6.82,8.11 9.29,6 12.25,6c2.84,0 5.23,1.94 5.9,4.57c1.63,0.2 2.85,1.58 2.85,3.28C21,15.86 19.88,17.5 18.5,17.5z" />
+    <!-- Bidirectional arrows inside the cloud -->
+    <path
+        android:strokeColor="#0D1117"
+        android:strokeWidth="1.25"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"
+        android:pathData="M9,12h6M13.5,10.5L15,12l-1.5,1.5M15,14.5H9M10.5,13L9,14.5L10.5,16" />
+</vector>

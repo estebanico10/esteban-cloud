@@ -27,8 +27,19 @@ $sumsPath = "$ProjectRoot\release\SHA256SUMS.txt"
 if (-not (Test-Path $exePath)) { throw "No se encontró $exePath" }
 
 $sha = (Get-FileHash $exePath -Algorithm SHA256).Hash
-"$sha  Esteban-Cloud-Setup-$ver.exe" | Set-Content -Path $sumsPath -Encoding ascii
+$apkPath = "$ProjectRoot\release\Esteban-Cloud-$ver.apk"
+if (Test-Path "$ProjectRoot\android-app\AndroidManifest.xml") {
+  Write-Host "=== [2.5/6] Compilando y firmando APK nativo de Android (v$ver) ===" -ForegroundColor Cyan
+  & "$ProjectRoot\scripts\build-android-apk.ps1"
+}
+$sumsLines = @("$sha  Esteban-Cloud-Setup-$ver.exe")
+if (Test-Path $apkPath) {
+  $apkSha = (Get-FileHash $apkPath -Algorithm SHA256).Hash
+  $sumsLines += "$apkSha  Esteban-Cloud-$ver.apk"
+}
+$sumsLines | Set-Content -Path $sumsPath -Encoding ascii
 Get-ChildItem "$ProjectRoot\release\Esteban-Cloud-Setup-*.exe*" | Where-Object { $_.Name -notlike "*$ver*" } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem "$ProjectRoot\release\Esteban-Cloud-*.apk" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*$ver*" -and $_.Name -ne "Esteban-Cloud.apk" } | Remove-Item -Force -ErrorAction SilentlyContinue
 Write-Host "Compilado OK: SHA-256 = $sha" -ForegroundColor Green
 
 Write-Host "=== [3/6] Instalando silenciosamente v$ver en este equipo ===" -ForegroundColor Cyan
@@ -43,6 +54,11 @@ if (Test-Path "E:\CODE\ESTEBAN CLOUD") {
   New-Item -ItemType Directory -Path "E:\CODE\ESTEBAN CLOUD\release" -Force | Out-Null
   Get-ChildItem "E:\CODE\ESTEBAN CLOUD\release\Esteban-Cloud-Setup-*.exe*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*$ver*" } | Remove-Item -Force -ErrorAction SilentlyContinue
   Copy-Item $exePath "E:\CODE\ESTEBAN CLOUD\release\Esteban-Cloud-Setup-$ver.exe" -Force
+  if (Test-Path $apkPath) {
+    Get-ChildItem "E:\CODE\ESTEBAN CLOUD\release\Esteban-Cloud-*.apk" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Copy-Item $apkPath "E:\CODE\ESTEBAN CLOUD\release\Esteban-Cloud-$ver.apk" -Force
+    Copy-Item $apkPath "E:\CODE\ESTEBAN CLOUD\release\Esteban-Cloud.apk" -Force
+  }
   Copy-Item $sumsPath "E:\CODE\ESTEBAN CLOUD\release\SHA256SUMS.txt" -Force
 }
 
@@ -50,6 +66,11 @@ foreach ($kitRoot in @("E:\Esteban-Cloud-Kit", "F:\Esteban-Cloud-Kit")) {
   if (Test-Path $kitRoot) {
     Get-ChildItem "$kitRoot\Esteban-Cloud-Setup-*.exe" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "*$ver*" } | Remove-Item -Force -ErrorAction SilentlyContinue
     Copy-Item $exePath "$kitRoot\Esteban-Cloud-Setup-$ver.exe" -Force
+    if (Test-Path $apkPath) {
+      Get-ChildItem "$kitRoot\Esteban-Cloud-*.apk" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+      Copy-Item $apkPath "$kitRoot\Esteban-Cloud-$ver.apk" -Force
+      Copy-Item $apkPath "$kitRoot\Esteban-Cloud.apk" -Force
+    }
     $cmdPath = "$kitRoot\1-INSTALAR-ESTEBAN-CLOUD.cmd"
     if (Test-Path $cmdPath) {
       $cmdContent = (Get-Content $cmdPath -Raw) -replace 'Esteban-Cloud-Setup-\d+\.\d+\.\d+\.exe', "Esteban-Cloud-Setup-$ver.exe"
@@ -79,11 +100,13 @@ Actualización automática publicada por **Esteban Nicola** ([estebanico.com](ht
 ### Verificación SHA-256
 - ``Esteban-Cloud-Setup-$ver.exe``: ``SHA-256: $sha``
 "@
+  $releaseAssets = @($exePath, $sumsPath)
+  if (Test-Path $apkPath) { $releaseAssets += $apkPath }
   gh release view "v$ver" >$null 2>&1
   if ($LASTEXITCODE -eq 0) {
-    gh release upload "v$ver" $exePath $sumsPath --clobber
+    gh release upload "v$ver" @releaseAssets --clobber
   } else {
-    gh release create "v$ver" $exePath $sumsPath --title "Esteban Cloud v$ver" --notes $notes --latest
+    gh release create "v$ver" @releaseAssets --title "Esteban Cloud v$ver (Windows + Android APK)" --notes $notes --latest
   }
   if ($LASTEXITCODE -ne 0) { throw "gh release falló." }
   $ErrorActionPreference = $prevEap

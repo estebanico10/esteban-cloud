@@ -37,7 +37,18 @@ const {
   scanSharedStorage,
   computeFileHashSummary,
   runFolderSync,
-  ClipboardHistoryStore
+  ClipboardHistoryStore,
+  captureLocalScreenJpeg,
+  listTopProcesses,
+  killLocalProcess,
+  executeQuickSystemAction,
+  saveAirDropFile,
+  EncryptedVaultStore,
+  encryptFileForUsb,
+  decryptFileFromUsb,
+  convertImageFile,
+  scanGitProjects,
+  gitQuickCommitPush
 } = require('./tools.cjs');
 
 // Prevent duplicate instances competing for port 4789 (EADDRINUSE)
@@ -71,6 +82,7 @@ process.on('unhandledRejection', (reason) => {
 const store = new ConfigStore();
 const chatStore = new ChatStore();
 const clipboardStore = new ClipboardHistoryStore(path.join(defaultConfigDir(), 'clipboard-history.json'));
+const vaultStore = new EncryptedVaultStore(path.join(defaultConfigDir(), 'secret-vault.json'));
 let keepAwakeBlockerId = null;
 
 function normalizeMetricsShape(m) {
@@ -132,7 +144,20 @@ const server = new EstebanCloudServer(store, {
     try { clipboard.writeText(text); } catch {}
     clipboardStore.addItem({ text, senderNode: senderNode || 'Equipo remoto' });
     sendWindowsNotification(`Portapapeles recibido de ${senderNode || 'Equipo remoto'}`, text.slice(0, 95));
-  }
+  },
+  getClipboardItemsFn: () => clipboardStore.listItems(),
+  onAirDropReceive: async ({ fileName, dataBase64, senderNode }) => {
+    const saved = saveAirDropFile({ fileName, dataBase64, senderNode });
+    sendWindowsNotification(`AirDrop recibido de ${senderNode || 'Equipo remoto'}`, `${saved.fileName} guardado en Descargas\\EstebanCloud-AirDrop`);
+    return saved;
+  },
+  onScreenCapture: async () => captureLocalScreenJpeg({ maxWidth: 1280, quality: 72 }),
+  onListProcesses: async () => listTopProcesses({ limit: 15 }),
+  onKillProcess: async (pid) => killLocalProcess(pid),
+  onSystemAction: async (action, payload) => executeQuickSystemAction(action, payload),
+  onVaultList: () => vaultStore.listItems(),
+  onVaultUpsert: (item) => vaultStore.upsertItem(item),
+  onVaultDelete: (id) => { vaultStore.deleteItem(id); return true; }
 });
 const mountManager = new MountManager({
   onLog: (entry) => {
@@ -1722,6 +1747,174 @@ function registerUpdatesMetricsAndChatIpc() {
       keepAwakeBlockerId = null;
     }
     return buildFullState();
+  });
+
+  ipcMain.handle('tools:openAirDropFolder', async () => {
+    const dir = path.join(os.homedir(), 'Downloads', 'EstebanCloud-AirDrop');
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+    return { ok: true, dir };
+  });
+
+  ipcMain.handle('tools:sendAirDropFiles', async (_e, { peerUrl } = {}) => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Seleccionar archivos para enviar por AirDrop',
+      properties: ['openFile', 'multiSelections']
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true, sent: [] };
+
+    const sent = [];
+    for (const fp of res.filePaths) {
+      const fileName = path.basename(fp);
+      const dataBase64 = fs.readFileSync(fp).toString('base64');
+      if (!peerUrl || peerUrl === 'local') {
+        const saved = saveAirDropFile({ fileName, dataBase64, senderNode: store.data.nodeName });
+        sent.push(saved);
+      } else {
+        const cleanUrl = String(peerUrl).replace(/\/$/, '');
+        const remoteRes = await httpJsonRequest(`${cleanUrl}/api/tools/airdrop`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileName, dataBase64, senderNode: store.data.nodeName }),
+          timeout: 30000
+        });
+        sent.push(remoteRes.data);
+      }
+    }
+    return { canceled: false, sent };
+  });
+
+  ipcMain.handle('tools:fetchRemoteScreen', async (_e, { peerUrl } = {}) => {
+    if (!peerUrl || peerUrl === 'local') {
+      const snap = await captureLocalScreenJpeg({ maxWidth: 1280, quality: 72 });
+      return { ok: true, nodeName: store.data.nodeName, ...snap };
+    }
+    const cleanUrl = String(peerUrl).replace(/\/$/, '');
+    const res = await httpJsonRequest(`${cleanUrl}/api/tools/screen`, { timeout: 10000 });
+    return res.data;
+  });
+
+  ipcMain.handle('tools:fetchRemoteProcesses', async (_e, { peerUrl } = {}) => {
+    if (!peerUrl || peerUrl === 'local') {
+      const processes = await listTopProcesses({ limit: 15 });
+      return { ok: true, nodeName: store.data.nodeName, processes };
+    }
+    const cleanUrl = String(peerUrl).replace(/\/$/, '');
+    const res = await httpJsonRequest(`${cleanUrl}/api/tools/processes`, { timeout: 8000 });
+    return res.data;
+  });
+
+  ipcMain.handle('tools:killRemoteProcess', async (_e, { peerUrl, pid } = {}) => {
+    if (!peerUrl || peerUrl === 'local') {
+      return killLocalProcess(pid);
+    }
+    const cleanUrl = String(peerUrl).replace(/\/$/, '');
+    const res = await httpJsonRequest(`${cleanUrl}/api/tools/kill-process`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pid }),
+      timeout: 6000
+    });
+    return res.data;
+  });
+
+  ipcMain.handle('tools:runRemoteSystemAction', async (_e, { peerUrl, action, payload } = {}) => {
+    if (!peerUrl || peerUrl === 'local' || action === 'wake-on-lan') {
+      return executeQuickSystemAction(action, payload || {});
+    }
+    const cleanUrl = String(peerUrl).replace(/\/$/, '');
+    const res = await httpJsonRequest(`${cleanUrl}/api/tools/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, payload: payload || {} }),
+      timeout: 8000
+    });
+    return res.data;
+  });
+
+  ipcMain.handle('tools:vaultList', async () => vaultStore.listItems());
+
+  ipcMain.handle('tools:vaultUpsert', async (_e, item) => {
+    const saved = vaultStore.upsertItem(item || {});
+    return { item: saved, items: vaultStore.listItems() };
+  });
+
+  ipcMain.handle('tools:vaultDelete', async (_e, id) => {
+    vaultStore.deleteItem(id);
+    return { items: vaultStore.listItems() };
+  });
+
+  ipcMain.handle('tools:vaultSyncPeers', async () => {
+    const env = await checkEnvironment();
+    const port = store.data.port || 4789;
+    const targets = new Set();
+    for (const tp of (env.tailscale.peers || [])) {
+      if (tp.online && tp.ip && tp.os === 'windows') targets.add(`http://${tp.ip}:${port}`);
+    }
+    const localItems = vaultStore.listItems();
+    let syncedPeers = 0;
+    for (const baseUrl of targets) {
+      try {
+        const remote = await httpJsonRequest(`${baseUrl}/api/tools/vault`, { timeout: 4000 });
+        for (const rItem of (remote.data && remote.data.items) || []) {
+          vaultStore.upsertItem(rItem);
+        }
+        for (const lItem of localItems) {
+          await httpJsonRequest(`${baseUrl}/api/tools/vault`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(lItem),
+            timeout: 4000
+          });
+        }
+        syncedPeers += 1;
+      } catch {}
+    }
+    return { syncedPeers, items: vaultStore.listItems() };
+  });
+
+  ipcMain.handle('tools:pickAndEncryptFileUsb', async (_e, { passphrase } = {}) => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Seleccionar archivo para cifrar con AES-256-GCM (.ecloudenc)',
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true };
+    const out = encryptFileForUsb({ filePath: res.filePaths[0], passphrase });
+    return { canceled: false, ...out };
+  });
+
+  ipcMain.handle('tools:pickAndDecryptFileUsb', async (_e, { passphrase } = {}) => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Seleccionar archivo cifrado (.ecloudenc) para descifrar',
+      filters: [{ name: 'Archivo Cifrado Esteban Cloud', extensions: ['ecloudenc'] }, { name: 'Todos', extensions: ['*'] }],
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true };
+    const out = decryptFileFromUsb({ filePath: res.filePaths[0], passphrase });
+    return { canceled: false, ...out };
+  });
+
+  ipcMain.handle('tools:pickAndConvertImage', async (_e, { outputFormat = 'png', maxWidth = 0 } = {}) => {
+    const res = await dialog.showOpenDialog(mainWindow, {
+      title: 'Seleccionar imagen para convertir / redimensionar',
+      filters: [{ name: 'Imágenes', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp', 'ico'] }],
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths.length) return { canceled: true };
+    const out = await convertImageFile({ inputPath: res.filePaths[0], outputFormat, maxWidth: Number(maxWidth) || 0 });
+    return { canceled: false, ...out };
+  });
+
+  ipcMain.handle('tools:scanGitProjects', async () => {
+    const rootDirs = [
+      path.join(os.homedir(), 'Esteban Nicola', 'Apps', 'MY APPS'),
+      'E:\\CODE'
+    ];
+    return scanGitProjects({ rootDirs });
+  });
+
+  ipcMain.handle('tools:gitQuickCommitPush', async (_e, { repoDir, message } = {}) => {
+    return gitQuickCommitPush({ repoDir, message });
   });
 }
 

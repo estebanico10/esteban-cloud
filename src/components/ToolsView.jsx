@@ -28,6 +28,10 @@ import {
 const SUB_TABS = [
   { id: 'all', label: 'Todas' },
   { id: 'keys', label: 'Claves y Accesos Rápidos' },
+  { id: 'airdrop', label: '⚡ AirDrop Instantáneo' },
+  { id: 'remote', label: '🖥️ Control y Pantalla Remota' },
+  { id: 'vault', label: '🔐 Bóveda y Cifrador USB' },
+  { id: 'studio', label: '🎨 Estudio VisualCorp y Git' },
   { id: 'sync', label: 'Sincronizador de Carpetas' },
   { id: 'clipboard', label: 'Portapapeles en Malla' },
   { id: 'doctor', label: 'Doctor de Red / RDP / SMB' },
@@ -698,6 +702,625 @@ export default function ToolsView({ api, state, flash, onQuickConnectKey, onOpen
     }
   };
 
+  // 7. Auto-Watch in Sync Studio
+  const [autoWatchSync, setAutoWatchSync] = useState(Boolean(state?.autoWatchSync));
+
+  const handleToggleAutoWatchSync = async (checked) => {
+    const next = Boolean(checked);
+    if (next && (!sourceDir.trim() || !targetDir.trim())) {
+      flash?.('error', 'Configura carpeta origen y destino antes de activar Auto-Watch.');
+      return;
+    }
+    setAutoWatchSync(next);
+    try {
+      if (api?.setFolderAutoWatch) {
+        await api.setFolderAutoWatch({
+          enabled: next,
+          sourceDir: sourceDir.trim(),
+          targetDir: targetDir.trim(),
+          mirror: mirrorMode
+        });
+      } else if (api?.toggleFolderAutoWatch) {
+        await api.toggleFolderAutoWatch({
+          enabled: next,
+          sourceDir: sourceDir.trim(),
+          targetDir: targetDir.trim(),
+          mirror: mirrorMode
+        });
+      }
+      flash?.(
+        'ok',
+        next
+          ? '🔄 Auto-Watch en tiempo real activado: los cambios en origen se sincronizarán automáticamente.'
+          : 'Auto-Watch en tiempo real detenido.'
+      );
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo cambiar el estado de Auto-Watch.');
+    }
+  };
+
+  useEffect(() => {
+    if (!autoWatchSync) return undefined;
+    if (api?.setFolderAutoWatch || api?.toggleFolderAutoWatch) return undefined;
+    const timer = setInterval(() => {
+      if (!syncingFolders && sourceDir.trim() && targetDir.trim() && api?.runFolderSync) {
+        api
+          .runFolderSync({
+            sourceDir: sourceDir.trim(),
+            targetDir: targetDir.trim(),
+            mirror: mirrorMode,
+            saveProfile: false
+          })
+          .then((res) => {
+            const r = res?.result || res || {};
+            if (Number(r.filesCopied || 0) > 0 || Number(r.filesDeleted || 0) > 0) {
+              setLastSyncResult({
+                sourceDir: sourceDir.trim(),
+                targetDir: targetDir.trim(),
+                mirror: mirrorMode,
+                filesCopied: Number(r.filesCopied || 0),
+                bytesCopied: Number(r.bytesCopied || 0),
+                filesDeleted: Number(r.filesDeleted || 0),
+                filesSkipped: Number(r.filesSkipped || 0),
+                durationMs: Number(r.durationMs || 0),
+                completedAt: new Date().toISOString()
+              });
+            }
+          })
+          .catch(() => {});
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [autoWatchSync, syncingFolders, sourceDir, targetDir, mirrorMode, api]);
+
+  // 8. Peer targets for AirDrop & Remote Control
+  const meshPeerOptions = useMemo(() => {
+    const defaultPort = Number(config?.port) || 4789;
+    const list = [
+      {
+        id: 'local',
+        peerUrl: '',
+        host: '127.0.0.1',
+        port: defaultPort,
+        label: `${config?.nodeName || env?.hostName || 'Esta PC'} (Local)`,
+        isLocal: true
+      }
+    ];
+    const seenUrls = new Set(['']);
+
+    const addPeerOption = (ip, port, name, tag = '') => {
+      if (!ip) return;
+      const p = Number(port) || defaultPort;
+      const url = `http://${ip}:${p}`;
+      if (seenUrls.has(url)) return;
+      seenUrls.add(url);
+      list.push({
+        id: url,
+        peerUrl: url,
+        host: ip,
+        port: p,
+        label: `${name || ip}${tag ? ` (${tag})` : ''}`,
+        isLocal: false
+      });
+    };
+
+    for (const tp of tailscalePeers) {
+      if (tp?.ip) {
+        addPeerOption(tp.ip, defaultPort, tp.hostName || tp.ip, tp.online ? 'Tailscale · Online' : 'Tailscale');
+      }
+    }
+    for (const sp of savedPeers) {
+      const ip = sp.tailscaleIp || sp.lanIp;
+      if (ip) {
+        addPeerOption(ip, sp.port || defaultPort, sp.nodeName || sp.label || ip, 'Guardado');
+      }
+    }
+    for (const k of detectedKeys) {
+      const ip = k.tailscaleIp || k.lanIp;
+      if (ip) {
+        addPeerOption(ip, k.port || defaultPort, k.nodeName || k.label || ip, 'Llave');
+      }
+    }
+    if (!list.some((x) => x.label.toLowerCase().includes('dell'))) {
+      addPeerOption('100.118.251.119', defaultPort, 'EstebanPcDELL', 'Tailscale');
+    }
+    return list;
+  }, [config, env, tailscalePeers, savedPeers, detectedKeys]);
+
+  // 9. AirDrop Instantáneo state
+  const [airDropPeerUrl, setAirDropPeerUrl] = useState(() => {
+    const firstRemote = meshPeerOptions.find((p) => !p.isLocal);
+    return firstRemote ? firstRemote.peerUrl : '';
+  });
+  const [sendingAirDrop, setSendingAirDrop] = useState(false);
+  const [airDropResults, setAirDropResults] = useState([]);
+
+  const handleSendAirDropFiles = async () => {
+    if (!api?.sendAirDropFiles) {
+      flash?.('error', 'El envío AirDrop no está disponible en este momento.');
+      return;
+    }
+    setSendingAirDrop(true);
+    try {
+      const res = await api.sendAirDropFiles({ peerUrl: airDropPeerUrl });
+      if (res?.canceled) {
+        setSendingAirDrop(false);
+        return;
+      }
+      const filesSent = Array.isArray(res?.files)
+        ? res.files
+        : Array.isArray(res?.sentFiles)
+          ? res.sentFiles
+          : res?.fileName
+            ? [res]
+            : [];
+      if (filesSent.length > 0) {
+        setAirDropResults((prev) => [...filesSent, ...prev].slice(0, 15));
+      }
+      const count = res?.sentCount ?? (filesSent.length || 1);
+      flash?.(
+        'ok',
+        `⚡ AirDrop completado: ${count} ${count === 1 ? 'archivo enviado' : 'archivos enviados'} directamente a Downloads\\EstebanCloud-AirDrop.`
+      );
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudieron enviar los archivos por AirDrop.');
+    } finally {
+      setSendingAirDrop(false);
+    }
+  };
+
+  const handleOpenAirDropFolder = async () => {
+    try {
+      if (api?.openAirDropFolder) {
+        await api.openAirDropFolder();
+        return;
+      }
+      const fallbackDir = state?.airDropDir || env?.airDropDir || 'Downloads\\EstebanCloud-AirDrop';
+      if (api?.openLocalFolder) {
+        await api.openLocalFolder(fallbackDir);
+      }
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo abrir la carpeta EstebanCloud-AirDrop.');
+    }
+  };
+
+  // 10. Control y Pantalla Remota state
+  const [remoteTargetUrl, setRemoteTargetUrl] = useState('');
+  const [remoteScreen, setRemoteScreen] = useState(null);
+  const [loadingScreen, setLoadingScreen] = useState(false);
+  const [liveScreenStream, setLiveScreenStream] = useState(false);
+  const [remoteProcesses, setRemoteProcesses] = useState([]);
+  const [loadingProcesses, setLoadingProcesses] = useState(false);
+  const [killingPid, setKillingPid] = useState(null);
+  const [runningSysAction, setRunningSysAction] = useState('');
+  const [wolMac, setWolMac] = useState(() => config?.lastWolMac || 'AA:BB:CC:DD:EE:FF');
+
+  const handleFetchRemoteScreen = useCallback(
+    async (silent = false) => {
+      if (!api?.fetchRemoteScreen) {
+        if (!silent) flash?.('error', 'La captura de pantalla remota no está disponible.');
+        return;
+      }
+      if (!silent) setLoadingScreen(true);
+      try {
+        const res = await api.fetchRemoteScreen({ peerUrl: remoteTargetUrl });
+        const payload = res?.result || res;
+        if (payload?.dataUrl) {
+          setRemoteScreen({
+            dataUrl: payload.dataUrl,
+            capturedAt: payload.capturedAt || new Date().toISOString(),
+            peerUrl: remoteTargetUrl
+          });
+          if (!silent) {
+            flash?.('ok', '📸 Captura de pantalla en vivo actualizada.');
+          }
+        }
+      } catch (err) {
+        if (!silent) {
+          flash?.('error', err?.message || 'No se pudo obtener la pantalla del equipo.');
+        }
+      } finally {
+        if (!silent) setLoadingScreen(false);
+      }
+    },
+    [api, remoteTargetUrl, flash]
+  );
+
+  useEffect(() => {
+    if (!liveScreenStream) return undefined;
+    handleFetchRemoteScreen(true);
+    const interval = setInterval(() => {
+      handleFetchRemoteScreen(true);
+    }, 3500);
+    return () => clearInterval(interval);
+  }, [liveScreenStream, handleFetchRemoteScreen]);
+
+  const handleFetchRemoteProcesses = async () => {
+    if (!api?.fetchRemoteProcesses) {
+      flash?.('error', 'El monitor de procesos remotos no está disponible.');
+      return;
+    }
+    setLoadingProcesses(true);
+    try {
+      const res = await api.fetchRemoteProcesses({ peerUrl: remoteTargetUrl, limit: 15 });
+      const list = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.processes)
+          ? res.processes
+          : Array.isArray(res?.result)
+            ? res.result
+            : [];
+      setRemoteProcesses(list);
+      flash?.('ok', `📋 Lista de procesos actualizada (${list.length} procesos top).`);
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudieron obtener los procesos del equipo.');
+    } finally {
+      setLoadingProcesses(false);
+    }
+  };
+
+  const handleKillRemoteProcess = async (pid, name) => {
+    const killFn = api?.killRemoteProcess || api?.killProcess;
+    if (!killFn && !api?.executeRemoteAction) {
+      flash?.('error', 'La función para terminar procesos no está disponible.');
+      return;
+    }
+    setKillingPid(pid);
+    try {
+      if (killFn) {
+        await killFn({ peerUrl: remoteTargetUrl, pid });
+      } else {
+        await api.executeRemoteAction({
+          peerUrl: remoteTargetUrl,
+          action: 'kill-process',
+          payload: { pid }
+        });
+      }
+      setRemoteProcesses((prev) => prev.filter((p) => Number(p.pid) !== Number(pid)));
+      flash?.('ok', `Proceso ${name || ''} (PID ${pid}) terminado.`);
+    } catch (err) {
+      flash?.('error', err?.message || `No se pudo terminar el proceso ${pid}.`);
+    } finally {
+      setKillingPid(null);
+    }
+  };
+
+  const handleQuickSystemAction = async (action, extraPayload = {}, confirmMsg = '') => {
+    const execFn =
+      api?.executeRemoteAction || api?.executeQuickSystemAction || api?.runSystemAction;
+    if (!execFn) {
+      flash?.('error', 'La acción rápida de sistema no está disponible.');
+      return;
+    }
+    setRunningSysAction(action);
+    try {
+      const res = await execFn({
+        peerUrl: remoteTargetUrl,
+        action,
+        payload: extraPayload
+      });
+      flash?.('ok', res?.message || confirmMsg || `Acción '${action}' ejecutada correctamente.`);
+    } catch (err) {
+      flash?.('error', err?.message || `Error al ejecutar acción '${action}'.`);
+    } finally {
+      setRunningSysAction('');
+    }
+  };
+
+  // 11. Bóveda Secreta Cifrada (Esteban Vault) & Cifrador USB state
+  const [vaultItems, setVaultItems] = useState(() =>
+    Array.isArray(state?.vaultItems) ? state.vaultItems : []
+  );
+  const [loadingVault, setLoadingVault] = useState(false);
+  const [syncingVault, setSyncingVault] = useState(false);
+  const [vaultForm, setVaultForm] = useState({
+    id: '',
+    title: '',
+    category: 'password',
+    username: '',
+    secret: '',
+    notes: ''
+  });
+  const [visibleVaultSecrets, setVisibleVaultSecrets] = useState({});
+  const [usbFilePassphrase, setUsbFilePassphrase] = useState('');
+  const [processingUsbCrypto, setProcessingUsbCrypto] = useState(false);
+  const [lastUsbCryptoResult, setLastUsbCryptoResult] = useState(null);
+
+  const loadVaultItems = useCallback(async () => {
+    if (!api?.vaultList) return;
+    setLoadingVault(true);
+    try {
+      const res = await api.vaultList();
+      const items = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.items)
+          ? res.items
+          : Array.isArray(res?.vaultItems)
+            ? res.vaultItems
+            : [];
+      setVaultItems(items);
+    } catch {
+      // ignore initial load error
+    } finally {
+      setLoadingVault(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (Array.isArray(state?.vaultItems)) {
+      setVaultItems(state.vaultItems);
+    }
+  }, [state?.vaultItems]);
+
+  useEffect(() => {
+    loadVaultItems();
+  }, [loadVaultItems]);
+
+  const handleVaultUpsert = async (e) => {
+    if (e?.preventDefault) e.preventDefault();
+    if (!vaultForm.title.trim()) {
+      flash?.('error', 'Ingresa un título para el secreto, licencia o nota.');
+      return;
+    }
+    if (!api?.vaultUpsert) {
+      flash?.('error', 'La Bóveda Secreta Cifrada no está disponible.');
+      return;
+    }
+    setLoadingVault(true);
+    try {
+      const res = await api.vaultUpsert({
+        id: vaultForm.id || undefined,
+        title: vaultForm.title.trim(),
+        category: vaultForm.category || 'general',
+        username: vaultForm.username.trim(),
+        secret: vaultForm.secret,
+        notes: vaultForm.notes
+      });
+      if (Array.isArray(res?.items)) {
+        setVaultItems(res.items);
+      } else if (Array.isArray(res?.vaultItems)) {
+        setVaultItems(res.vaultItems);
+      } else if (res?.item || res?.id) {
+        const savedItem = res.item || res;
+        setVaultItems((prev) => [
+          savedItem,
+          ...prev.filter((it) => it.id !== savedItem.id)
+        ]);
+      } else {
+        await loadVaultItems();
+      }
+      setVaultForm({
+        id: '',
+        title: '',
+        category: 'password',
+        username: '',
+        secret: '',
+        notes: ''
+      });
+      flash?.('ok', '🔐 Elemento cifrado con AES-256-GCM y guardado en Esteban Vault.');
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo guardar en la bóveda.');
+    } finally {
+      setLoadingVault(false);
+    }
+  };
+
+  const handleVaultDelete = async (id) => {
+    if (!api?.vaultDelete) return;
+    try {
+      const res = await api.vaultDelete(id);
+      if (Array.isArray(res?.items)) {
+        setVaultItems(res.items);
+      } else {
+        setVaultItems((prev) => prev.filter((it) => it.id !== id));
+      }
+      flash?.('ok', 'Elemento eliminado de la bóveda.');
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo eliminar el elemento de la bóveda.');
+    }
+  };
+
+  const handleVaultSyncPeers = async () => {
+    if (!api?.vaultSyncPeers) {
+      flash?.('error', 'La sincronización P2P de bóveda no está disponible.');
+      return;
+    }
+    setSyncingVault(true);
+    try {
+      const res = await api.vaultSyncPeers();
+      if (Array.isArray(res?.items)) {
+        setVaultItems(res.items);
+      } else {
+        await loadVaultItems();
+      }
+      flash?.('ok', '🔄 Bóveda sincronizada con los equipos de tu malla.');
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo sincronizar la bóveda con la malla.');
+    } finally {
+      setSyncingVault(false);
+    }
+  };
+
+  const handleEncryptUsbFile = async () => {
+    const fn = api?.pickAndEncryptUsbFile || api?.encryptFileForUsb;
+    if (!fn) {
+      flash?.('error', 'El cifrador de archivos USB no está disponible.');
+      return;
+    }
+    const pass = usbFilePassphrase.trim();
+    if (!pass) {
+      flash?.('error', 'Ingresa una contraseña para cifrar el archivo (.ecloudenc).');
+      return;
+    }
+    setProcessingUsbCrypto(true);
+    try {
+      const res = await fn({ passphrase: pass });
+      if (res?.canceled) {
+        setProcessingUsbCrypto(false);
+        return;
+      }
+      const out = res?.result || res;
+      if (out?.outputPath) {
+        setLastUsbCryptoResult({
+          mode: 'encrypt',
+          outputPath: out.outputPath,
+          size: Number(out.size || 0)
+        });
+        flash?.('ok', `🔒 Archivo cifrado creado: ${out.outputPath}`);
+      }
+    } catch (err) {
+      flash?.('error', err?.message || 'Error al cifrar el archivo.');
+    } finally {
+      setProcessingUsbCrypto(false);
+    }
+  };
+
+  const handleDecryptUsbFile = async () => {
+    const fn = api?.pickAndDecryptUsbFile || api?.decryptFileFromUsb;
+    if (!fn) {
+      flash?.('error', 'El descifrador de archivos USB no está disponible.');
+      return;
+    }
+    const pass = usbFilePassphrase.trim();
+    if (!pass) {
+      flash?.('error', 'Ingresa la contraseña para descifrar el archivo .ecloudenc.');
+      return;
+    }
+    setProcessingUsbCrypto(true);
+    try {
+      const res = await fn({ passphrase: pass });
+      if (res?.canceled) {
+        setProcessingUsbCrypto(false);
+        return;
+      }
+      const out = res?.result || res;
+      if (out?.outputPath) {
+        setLastUsbCryptoResult({
+          mode: 'decrypt',
+          outputPath: out.outputPath,
+          size: Number(out.size || 0)
+        });
+        flash?.('ok', `🔓 Archivo descifrado restaurado: ${out.outputPath}`);
+      }
+    } catch (err) {
+      flash?.('error', err?.message || 'Contraseña incorrecta o error al descifrar.');
+    } finally {
+      setProcessingUsbCrypto(false);
+    }
+  };
+
+  // 12. Estudio VisualCorp (Image Converter) & Git Projects Monitor state
+  const [imgFormat, setImgFormat] = useState('png');
+  const [imgMaxWidth, setImgMaxWidth] = useState(0);
+  const [convertingImg, setConvertingImg] = useState(false);
+  const [convertedImgResult, setConvertedImgResult] = useState(null);
+
+  const [gitProjects, setGitProjects] = useState(() =>
+    Array.isArray(state?.gitProjects) ? state.gitProjects : []
+  );
+  const [scanningGit, setScanningGit] = useState(false);
+  const [gitMessages, setGitMessages] = useState({});
+  const [pushingRepoPath, setPushingRepoPath] = useState('');
+  const [lastGitOutput, setLastGitOutput] = useState(null);
+
+  const handlePickAndConvertImage = async () => {
+    if (!api?.pickAndConvertImage) {
+      flash?.('error', 'El conversor de imágenes no está disponible.');
+      return;
+    }
+    setConvertingImg(true);
+    try {
+      const res = await api.pickAndConvertImage({
+        outputFormat: imgFormat,
+        maxWidth: Number(imgMaxWidth) || 0
+      });
+      if (res?.canceled) {
+        setConvertingImg(false);
+        return;
+      }
+      const out = res?.result || res;
+      if (out?.outputPath) {
+        setConvertedImgResult({
+          outputPath: out.outputPath,
+          size: Number(out.size || 0),
+          format: imgFormat.toUpperCase()
+        });
+        flash?.('ok', `🎨 Imagen convertida a ${imgFormat.toUpperCase()}: ${out.outputPath}`);
+      }
+    } catch (err) {
+      flash?.('error', err?.message || 'No se pudo convertir la imagen.');
+    } finally {
+      setConvertingImg(false);
+    }
+  };
+
+  const handleScanGitProjects = useCallback(async (silent = false) => {
+    if (!api?.scanGitProjects) {
+      if (!silent) flash?.('error', 'El monitor de proyectos Git no está disponible.');
+      return;
+    }
+    setScanningGit(true);
+    try {
+      const res = await api.scanGitProjects();
+      const repos = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.projects)
+          ? res.projects
+          : Array.isArray(res?.repos)
+            ? res.repos
+            : [];
+      setGitProjects(repos);
+      if (!silent) {
+        flash?.('ok', `Monitor Git actualizado: ${repos.length} repositorios encontrados.`);
+      }
+    } catch (err) {
+      if (!silent) {
+        flash?.('error', err?.message || 'Error al escanear repositorios Git.');
+      }
+    } finally {
+      setScanningGit(false);
+    }
+  }, [api, flash]);
+
+  useEffect(() => {
+    if (activeSection === 'studio' && gitProjects.length === 0) {
+      handleScanGitProjects(true);
+    }
+  }, [activeSection, gitProjects.length, handleScanGitProjects]);
+
+  const handleGitQuickCommitPush = async (repo) => {
+    if (!api?.gitQuickCommitPush) {
+      flash?.('error', 'La función Commit + Push rápido no está disponible.');
+      return;
+    }
+    const msg =
+      (gitMessages[repo.path] ?? 'chore: actualizacion rapida desde Esteban Cloud').trim() ||
+      'chore: actualizacion rapida desde Esteban Cloud';
+    setPushingRepoPath(repo.path);
+    try {
+      const res = await api.gitQuickCommitPush({
+        repoDir: repo.path,
+        message: msg
+      });
+      const out = res?.result || res || {};
+      setLastGitOutput({
+        repoName: repo.name,
+        ok: out.ok !== false,
+        output: out.output || 'Commit + Push finalizado.'
+      });
+      if (out.ok !== false) {
+        flash?.('ok', `🚀 Commit + Push completado en ${repo.name}.`);
+      } else {
+        flash?.('error', `Git reportó un aviso en ${repo.name}. Revisa la salida.`);
+      }
+      await handleScanGitProjects(true);
+    } catch (err) {
+      flash?.('error', err?.message || `No se pudo hacer Commit + Push en ${repo.name}.`);
+    } finally {
+      setPushingRepoPath('');
+    }
+  };
+
   const showSection = (id) => activeSection === 'all' || activeSection === id;
 
   return (
@@ -929,6 +1552,858 @@ export default function ToolsView({ api, state, flash, onQuickConnectKey, onOpen
         </div>
       )}
 
+      {/* Section — ⚡ AirDrop Instantáneo entre PCs y Celular */}
+      {showSection('airdrop') && (
+        <div className="card">
+          <div className="between">
+            <div>
+              <h2>⚡ AirDrop Instantáneo entre PCs y Celular</h2>
+              <p className="muted" style={{ margin: '4px 0 0' }}>
+                Envía archivos en 1 clic directamente a la carpeta <span className="mono">Downloads\EstebanCloud-AirDrop</span> de cualquier PC conectada en tu malla Tailscale o LAN.
+              </p>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={handleOpenAirDropFolder}
+              >
+                <FolderOpen size={14} /> Abrir carpeta local EstebanCloud-AirDrop
+              </button>
+              <span className="badge accent">Transferencia directa P2P</span>
+            </div>
+          </div>
+
+          <div className="between" style={{ gap: 12, alignItems: 'flex-end' }}>
+            <div className="field" style={{ flex: 1 }}>
+              <label>Seleccionar PC destino para AirDrop</label>
+              <div className="row" style={{ gap: 8 }}>
+                {meshPeerOptions.map((peer) => {
+                  const selected = airDropPeerUrl === peer.peerUrl;
+                  return (
+                    <button
+                      key={peer.id}
+                      type="button"
+                      className={`btn btn-sm ${selected ? 'btn-primary' : ''}`}
+                      onClick={() => setAirDropPeerUrl(peer.peerUrl)}
+                    >
+                      <Monitor size={13} />
+                      <span>{peer.label}</span>
+                      <span className="mono" style={{ fontSize: 11, opacity: 0.85 }}>
+                        ({peer.host}:{peer.port})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="field" style={{ minWidth: 260 }}>
+              <label>URL destino personalizada (opcional)</label>
+              <input
+                type="text"
+                className="mono"
+                value={airDropPeerUrl}
+                onChange={(e) => setAirDropPeerUrl(e.target.value)}
+                placeholder="Vacío = Esta PC · o http://100.x.y.z:4789"
+              />
+            </div>
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={handleSendAirDropFiles}
+              disabled={sendingAirDrop}
+            >
+              {sendingAirDrop
+                ? '⚡ Enviando archivos por AirDrop...'
+                : '⚡ Elegir y Enviar Archivos por AirDrop'}
+            </button>
+          </div>
+
+          {(airDropResults.length > 0 || Array.isArray(state?.airDropHistory) && state.airDropHistory.length > 0) && (
+            <div className="list" style={{ marginTop: 4 }}>
+              {(airDropResults.length > 0 ? airDropResults : state.airDropHistory).slice(0, 8).map((item, i) => (
+                <div key={`${item.savedPath || item.fileName || i}-${i}`} className="list-item">
+                  <div className="row" style={{ gap: 8 }}>
+                    <CheckCircle2 size={15} color="var(--ok)" />
+                    <strong>{item.fileName || 'Archivo AirDrop'}</strong>
+                    {item.size != null && <span className="badge accent">{fmtBytes(item.size)}</span>}
+                    {item.senderNode && <span className="badge">De: {item.senderNode}</span>}
+                    {item.savedPath && (
+                      <span className="muted mono" style={{ fontSize: 11.5 }}>{item.savedPath}</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={handleOpenAirDropFolder}
+                  >
+                    <FolderOpen size={13} /> Ver en carpeta
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Section — 🖥️ Control y Pantalla Remota (Monitor en Vivo + Procesos + Energía) */}
+      {showSection('remote') && (
+        <div className="card">
+          <div className="between">
+            <div>
+              <h2>🖥️ Control y Pantalla Remota (Monitor en Vivo + Procesos + Energía)</h2>
+              <p className="muted" style={{ margin: '4px 0 0' }}>
+                Visualiza la pantalla en vivo de cualquier PC, inspecciona o cierra procesos que consuman mucha RAM/CPU y ejecuta acciones rápidas de energía o mantenimiento.
+              </p>
+            </div>
+            <span className="badge accent">Telemetría y Control Remoto</span>
+          </div>
+
+          {/* Target PC Selector */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span className="muted" style={{ fontSize: 12, fontWeight: 600 }}>
+              Equipo objetivo:
+            </span>
+            <div className="row" style={{ gap: 8 }}>
+              {meshPeerOptions.map((peer) => {
+                const selected = remoteTargetUrl === peer.peerUrl;
+                return (
+                  <button
+                    key={peer.id}
+                    type="button"
+                    className={`btn btn-sm ${selected ? 'btn-primary' : ''}`}
+                    onClick={() => setRemoteTargetUrl(peer.peerUrl)}
+                  >
+                    <Monitor size={13} />
+                    <span>{peer.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Screen & Processes & Quick Actions bar */}
+          <div className="between" style={{ gap: 10 }}>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => handleFetchRemoteScreen(false)}
+                disabled={loadingScreen}
+              >
+                {loadingScreen ? '📸 Capturando pantalla...' : '📸 Ver Pantalla en Vivo'}
+              </button>
+              <label className="checkbox-row" style={{ marginLeft: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={liveScreenStream}
+                  onChange={(e) => setLiveScreenStream(e.target.checked)}
+                />
+                <span>Auto-refrescar cada 3.5s</span>
+              </label>
+              <button
+                type="button"
+                className="btn"
+                onClick={handleFetchRemoteProcesses}
+                disabled={loadingProcesses}
+              >
+                {loadingProcesses ? '📋 Cargando procesos...' : '📋 Ver Procesos Top CPU/RAM'}
+              </button>
+            </div>
+
+            <div className="row" style={{ gap: 7 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={runningSysAction === 'lock-screen'}
+                onClick={() =>
+                  handleQuickSystemAction('lock-screen', {}, '🔒 Pantalla bloqueada en el equipo objetivo.')
+                }
+              >
+                🔒 Bloquear pantalla
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={runningSysAction === 'empty-recycle-bin'}
+                onClick={() =>
+                  handleQuickSystemAction('empty-recycle-bin', {}, '🗑️ Papelera de reciclaje vaciada.')
+                }
+              >
+                🗑️ Vaciar papelera
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={runningSysAction === 'clear-temp'}
+                onClick={() =>
+                  handleQuickSystemAction('clear-temp', {}, '🧹 Archivos temporales limpiados.')
+                }
+              >
+                🧹 Limpiar temporales
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={runningSysAction === 'restart-explorer'}
+                onClick={() =>
+                  handleQuickSystemAction('restart-explorer', {}, '🔄 Explorador de Windows reiniciado.')
+                }
+              >
+                🔄 Reiniciar Explorer
+              </button>
+            </div>
+          </div>
+
+          {/* Wake-on-LAN Bar */}
+          <div className="between" style={{ gap: 10 }}>
+            <div className="row" style={{ gap: 8, flex: 1 }}>
+              <span className="muted" style={{ fontSize: 12.5 }}>
+                Dirección MAC para Wake-on-LAN:
+              </span>
+              <input
+                type="text"
+                className="mono"
+                style={{ maxWidth: 220 }}
+                value={wolMac}
+                onChange={(e) => setWolMac(e.target.value)}
+                placeholder="AA:BB:CC:DD:EE:FF"
+              />
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={runningSysAction === 'wake-on-lan'}
+                onClick={() =>
+                  handleQuickSystemAction(
+                    'wake-on-lan',
+                    { mac: wolMac.trim() },
+                    `⚡ Paquete mágico Wake-on-LAN enviado a ${wolMac.trim()}.`
+                  )
+                }
+              >
+                ⚡ Despertar PC por red (Wake-on-LAN)
+              </button>
+            </div>
+          </div>
+
+          {/* Live Screen Preview */}
+          {remoteScreen?.dataUrl && (
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                background: 'rgba(8, 12, 20, 0.85)',
+                border: '1px solid var(--border-strong)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 8
+              }}
+            >
+              <div className="between">
+                <div className="row" style={{ gap: 8 }}>
+                  <strong>Vista en Vivo del Escritorio</strong>
+                  <span className="badge accent">
+                    Capturado: {fmtDateTime(remoteScreen.capturedAt)}
+                  </span>
+                </div>
+                <div className="row" style={{ gap: 6 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => handleFetchRemoteScreen(false)}
+                  >
+                    <RefreshCw size={13} /> Actualizar captura
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setLiveScreenStream(false);
+                      setRemoteScreen(null);
+                    }}
+                  >
+                    Cerrar vista
+                  </button>
+                </div>
+              </div>
+              <img
+                src={remoteScreen.dataUrl}
+                alt="Captura remota"
+                style={{
+                  width: '100%',
+                  maxHeight: 520,
+                  objectFit: 'contain',
+                  borderRadius: 8,
+                  border: '1px solid var(--border)'
+                }}
+              />
+            </div>
+          )}
+
+          {/* Top Processes List */}
+          {remoteProcesses.length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div className="between">
+                <strong style={{ fontSize: 13.5 }}>
+                  Top Procesos por Uso de Memoria / CPU ({remoteProcesses.length})
+                </strong>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => setRemoteProcesses([])}
+                >
+                  Ocultar lista
+                </button>
+              </div>
+              <div className="list">
+                {remoteProcesses.map((proc) => (
+                  <div key={proc.pid} className="list-item">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <div className="row" style={{ gap: 8 }}>
+                        <strong>{proc.name}</strong>
+                        <span className="badge mono">PID {proc.pid}</span>
+                        <span className="badge accent">{proc.memoryMB} MB RAM</span>
+                        {proc.cpuSeconds > 0 && (
+                          <span className="badge">{proc.cpuSeconds}s CPU</span>
+                        )}
+                      </div>
+                      {proc.windowTitle && (
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          🪟 {proc.windowTitle}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger"
+                      disabled={killingPid === proc.pid}
+                      onClick={() => handleKillRemoteProcess(proc.pid, proc.name)}
+                    >
+                      <Trash2 size={13} />
+                      {killingPid === proc.pid ? 'Terminando...' : 'Terminar proceso'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Section — 🔐 Bóveda Secreta Cifrada (Esteban Vault · AES-256-GCM) & Cifrador de Archivos USB */}
+      {showSection('vault') && (
+        <div className="card">
+          <div className="between">
+            <div>
+              <h2>🔐 Bóveda Secreta Cifrada (Esteban Vault · AES-256-GCM) y Cifrador de Archivos USB</h2>
+              <p className="muted" style={{ margin: '4px 0 0' }}>
+                Almacena contraseñas, licencias, números de serie, tokens API y notas privadas cifradas en disco con AES-256-GCM, o cifra cualquier archivo para pendrive USB (<span className="mono">.ecloudenc</span>).
+              </p>
+            </div>
+            <div className="row" style={{ gap: 8 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={handleVaultSyncPeers}
+                disabled={syncingVault}
+              >
+                <RefreshCw size={13} />
+                {syncingVault ? 'Sincronizando bóveda...' : 'Sincronizar Bóveda entre PCs'}
+              </button>
+              <span className="badge ok">AES-256-GCM + PBKDF2</span>
+            </div>
+          </div>
+
+          <div className="grid-2" style={{ alignItems: 'start' }}>
+            {/* Left column: Vault Create / Edit Form */}
+            <form
+              onSubmit={handleVaultUpsert}
+              className="card"
+              style={{ background: 'rgba(11, 16, 26, 0.78)', gap: 10 }}
+            >
+              <strong>
+                {vaultForm.id ? '✏️ Editar secreto en bóveda' : '➕ Guardar nueva clave, licencia o nota cifrada'}
+              </strong>
+              <div className="grid-2">
+                <div className="field">
+                  <label>Título / Servicio</label>
+                  <input
+                    type="text"
+                    value={vaultForm.title}
+                    onChange={(e) => setVaultForm((p) => ({ ...p, title: e.target.value }))}
+                    placeholder="Ej: Licencia Windows 11 Pro / API OpenAI"
+                  />
+                </div>
+                <div className="field">
+                  <label>Categoría</label>
+                  <select
+                    value={vaultForm.category}
+                    onChange={(e) => setVaultForm((p) => ({ ...p, category: e.target.value }))}
+                  >
+                    <option value="password">Contraseña / Login</option>
+                    <option value="license">Licencia / Serial</option>
+                    <option value="api-key">Token / API Key</option>
+                    <option value="note">Nota Privada</option>
+                    <option value="general">General</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid-2">
+                <div className="field">
+                  <label>Usuario / Correo / ID (opcional)</label>
+                  <input
+                    type="text"
+                    value={vaultForm.username}
+                    onChange={(e) => setVaultForm((p) => ({ ...p, username: e.target.value }))}
+                    placeholder="Ej: esteban@visualcorp.com"
+                  />
+                </div>
+                <div className="field">
+                  <label>Secreto / Contraseña / Serial (cifrado AES-256-GCM)</label>
+                  <input
+                    type="text"
+                    className="mono"
+                    value={vaultForm.secret}
+                    onChange={(e) => setVaultForm((p) => ({ ...p, secret: e.target.value }))}
+                    placeholder="Clave, serial o token secreto..."
+                  />
+                </div>
+              </div>
+
+              <div className="field">
+                <label>Notas privadas adicionales (cifradas en reposo)</label>
+                <textarea
+                  rows={2}
+                  value={vaultForm.notes}
+                  onChange={(e) => setVaultForm((p) => ({ ...p, notes: e.target.value }))}
+                  placeholder="Instrucciones, códigos de recuperación o notas confidenciales..."
+                />
+              </div>
+
+              <div className="between">
+                {vaultForm.id ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() =>
+                      setVaultForm({
+                        id: '',
+                        title: '',
+                        category: 'password',
+                        username: '',
+                        secret: '',
+                        notes: ''
+                      })
+                    }
+                  >
+                    Cancelar edición
+                  </button>
+                ) : (
+                  <span className="muted" style={{ fontSize: 11.5 }}>
+                    Cifrado autenticado en disco local
+                  </span>
+                )}
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={loadingVault}
+                >
+                  <Save size={14} />
+                  {vaultForm.id ? 'Actualizar en Bóveda' : 'Guardar en Bóveda Cifrada'}
+                </button>
+              </div>
+            </form>
+
+            {/* Right column: USB File Encryptor / Decryptor (.ecloudenc) */}
+            <div
+              className="card"
+              style={{ background: 'rgba(11, 16, 26, 0.78)', gap: 10 }}
+            >
+              <strong>🛡️ Cifrador Militar de Archivos para Pendrive USB (.ecloudenc)</strong>
+              <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+                Protege cualquier documento, ZIP, base de datos o contrato con <span className="mono">PBKDF2-SHA256 (100,000 iteraciones) + AES-256-GCM</span> antes de llevarlo en tu USB.
+              </p>
+
+              <div className="field">
+                <label>Contraseña de cifrado / descifrado para el archivo</label>
+                <input
+                  type="text"
+                  className="mono"
+                  value={usbFilePassphrase}
+                  onChange={(e) => setUsbFilePassphrase(e.target.value)}
+                  placeholder="Escribe la contraseña para proteger o abrir el archivo .ecloudenc..."
+                />
+              </div>
+
+              <div className="row" style={{ gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleEncryptUsbFile}
+                  disabled={processingUsbCrypto}
+                >
+                  🔒 Cifrar archivo para USB (.ecloudenc)
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handleDecryptUsbFile}
+                  disabled={processingUsbCrypto}
+                >
+                  🔓 Descifrar archivo .ecloudenc
+                </button>
+              </div>
+
+              {lastUsbCryptoResult && (
+                <div className="banner ok" style={{ marginTop: 4 }}>
+                  <div className="between">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <strong>
+                        {lastUsbCryptoResult.mode === 'encrypt'
+                          ? '🔒 Archivo cifrado correctamente'
+                          : '🔓 Archivo descifrado correctamente'}
+                      </strong>
+                      <span className="mono" style={{ fontSize: 11.5, wordBreak: 'break-all' }}>
+                        {lastUsbCryptoResult.outputPath} ({fmtBytes(lastUsbCryptoResult.size)})
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() =>
+                        handleOpenFolderInExplorer(getParentFolder(lastUsbCryptoResult.outputPath))
+                      }
+                    >
+                      <FolderOpen size={13} /> Abrir carpeta
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Vault Items List */}
+          {vaultItems.length === 0 ? (
+            <div className="muted" style={{ fontSize: 12.5 }}>
+              Aún no hay elementos guardados en Esteban Vault. Usa el formulario superior para registrar tu primera clave, licencia o nota cifrada.
+            </div>
+          ) : (
+            <div className="list" style={{ marginTop: 6 }}>
+              {vaultItems.map((item) => {
+                const isRevealed = Boolean(visibleVaultSecrets[item.id]);
+                return (
+                  <div key={item.id} className="list-item" style={{ alignItems: 'flex-start' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}>
+                      <div className="row" style={{ gap: 8 }}>
+                        <strong>{item.title}</strong>
+                        <span className="badge accent">{item.category || 'general'}</span>
+                        {item.username && (
+                          <span className="badge mono">{item.username}</span>
+                        )}
+                        {item.updatedAt && (
+                          <span className="muted" style={{ fontSize: 11.5 }}>
+                            {fmtDateTime(item.updatedAt)}
+                          </span>
+                        )}
+                      </div>
+
+                      {item.secret && (
+                        <div className="row" style={{ gap: 8 }}>
+                          <span className="muted" style={{ fontSize: 12 }}>Secreto:</span>
+                          <code className="mono" style={{ fontSize: 12.5 }}>
+                            {isRevealed ? item.secret : '••••••••••••••••'}
+                          </code>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            style={{ padding: '2px 7px', fontSize: 11 }}
+                            onClick={() =>
+                              setVisibleVaultSecrets((p) => ({ ...p, [item.id]: !p[item.id] }))
+                            }
+                          >
+                            {isRevealed ? <EyeOff size={12} /> : <Eye size={12} />}
+                            {isRevealed ? 'Ocultar' : 'Mostrar'}
+                          </button>
+                        </div>
+                      )}
+
+                      {item.notes && (
+                        <div className="muted" style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>
+                          📝 {item.notes}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="row" style={{ gap: 6 }}>
+                      {item.secret && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            handleCopyText(item.secret, `Secreto de "${item.title}" copiado.`)
+                          }
+                        >
+                          <Copy size={13} /> Copiar secreto
+                        </button>
+                      )}
+                      {item.username && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            handleCopyText(item.username, `Usuario de "${item.title}" copiado.`)
+                          }
+                        >
+                          <Copy size={13} /> Usuario
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() =>
+                          setVaultForm({
+                            id: item.id,
+                            title: item.title || '',
+                            category: item.category || 'general',
+                            username: item.username || '',
+                            secret: item.secret || '',
+                            notes: item.notes || ''
+                          })
+                        }
+                      >
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-danger"
+                        onClick={() => handleVaultDelete(item.id)}
+                      >
+                        <Trash2 size={13} /> Eliminar
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Section — 🎨 Estudio VisualCorp (Conversor de Imágenes) & Monitor de Proyectos Git */}
+      {showSection('studio') && (
+        <div className="card">
+          <div className="between">
+            <div>
+              <h2>🎨 Estudio VisualCorp (Conversor de Imágenes) y Monitor de Proyectos Git</h2>
+              <p className="muted" style={{ margin: '4px 0 0' }}>
+                Convierte y redimensiona imágenes en 1 clic (<span className="mono">PNG / JPG / BMP / ICO</span>) y supervisa el estado Git de todos tus proyectos en <span className="mono">MY APPS</span> y <span className="mono">E:\CODE</span>.
+              </p>
+            </div>
+            <span className="badge accent">Productividad VisualCorp & Dev</span>
+          </div>
+
+          {/* 1-Click Image Converter */}
+          <div
+            className="card"
+            style={{ background: 'rgba(11, 16, 26, 0.78)', gap: 10 }}
+          >
+            <div className="between">
+              <strong>🖼️ Conversor y Redimensionador Rápido de Imágenes (PNG / JPG / BMP / ICO)</strong>
+              <span className="badge">Sin perder el archivo original</span>
+            </div>
+
+            <div className="between" style={{ gap: 12, alignItems: 'flex-end' }}>
+              <div className="row" style={{ gap: 12, flex: 1 }}>
+                <div className="field" style={{ minWidth: 160 }}>
+                  <label>Formato de salida</label>
+                  <select
+                    value={imgFormat}
+                    onChange={(e) => setImgFormat(e.target.value)}
+                  >
+                    <option value="png">PNG (Transparente / Alta calidad)</option>
+                    <option value="jpg">JPG (Comprimido / Fotos)</option>
+                    <option value="ico">ICO (Icono de Windows 256px)</option>
+                    <option value="bmp">BMP (Mapa de bits)</option>
+                  </select>
+                </div>
+
+                <div className="field" style={{ minWidth: 200 }}>
+                  <label>Ancho máximo (0 = mantener tamaño original)</label>
+                  <input
+                    type="number"
+                    className="mono"
+                    value={imgMaxWidth}
+                    onChange={(e) => setImgMaxWidth(Math.max(0, Number(e.target.value) || 0))}
+                    placeholder="0 = Original (ej. 1920, 1280, 512)"
+                  />
+                </div>
+
+                <div className="row" style={{ gap: 6, paddingBottom: 4 }}>
+                  {[0, 1920, 1280, 512, 256].map((presetW) => (
+                    <button
+                      key={presetW}
+                      type="button"
+                      className={`btn btn-sm ${Number(imgMaxWidth) === presetW ? 'btn-primary' : ''}`}
+                      onClick={() => setImgMaxWidth(presetW)}
+                    >
+                      {presetW === 0 ? 'Original' : `${presetW}px`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handlePickAndConvertImage}
+                disabled={convertingImg}
+              >
+                {convertingImg
+                  ? '🎨 Convirtiendo imagen...'
+                  : `🎨 Elegir imagen y convertir a ${imgFormat.toUpperCase()}`}
+              </button>
+            </div>
+
+            {convertedImgResult && (
+              <div className="banner ok">
+                <div className="between">
+                  <div className="row" style={{ gap: 8 }}>
+                    <CheckCircle2 size={16} />
+                    <span>
+                      <strong>Imagen convertida ({convertedImgResult.format}):</strong>{' '}
+                      <span className="mono">{convertedImgResult.outputPath}</span> (
+                      {fmtBytes(convertedImgResult.size)})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() =>
+                      handleOpenFolderInExplorer(getParentFolder(convertedImgResult.outputPath))
+                    }
+                  >
+                    <FolderOpen size={13} /> Abrir carpeta
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Git Projects Monitor */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div className="between">
+              <div>
+                <strong>🚀 Monitor de Proyectos Git (MY APPS & E:\CODE)</strong>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  Revisa qué proyectos tienen cambios sin subir y haz Commit + Push a GitHub en 1 clic.
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => handleScanGitProjects(false)}
+                disabled={scanningGit}
+              >
+                <RefreshCw size={13} />
+                {scanningGit ? 'Escaneando repositorios...' : 'Escanear Proyectos Git'}
+              </button>
+            </div>
+
+            {lastGitOutput && (
+              <div className={`banner ${lastGitOutput.ok ? 'ok' : 'warn'}`}>
+                <div className="between">
+                  <div>
+                    <strong>Resultado Git ({lastGitOutput.repoName}):</strong>
+                    <div className="mono" style={{ fontSize: 11.5, whiteSpace: 'pre-wrap', marginTop: 3 }}>
+                      {lastGitOutput.output}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => setLastGitOutput(null)}
+                  >
+                    Cerrar
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {gitProjects.length === 0 ? (
+              <div className="muted" style={{ fontSize: 12.5 }}>
+                Haz clic en &ldquo;Escanear Proyectos Git&rdquo; para listar todos tus repositorios en MY APPS y E:\CODE.
+              </div>
+            ) : (
+              <div className="list">
+                {gitProjects.map((repo) => {
+                  const isDirty = Number(repo.dirtyCount || 0) > 0;
+                  const commitMsg =
+                    gitMessages[repo.path] ?? 'chore: actualizacion rapida desde Esteban Cloud';
+                  return (
+                    <div
+                      key={repo.path}
+                      className="list-item"
+                      style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}
+                    >
+                      <div className="between">
+                        <div className="row" style={{ gap: 8 }}>
+                          <strong style={{ fontSize: 14 }}>{repo.name}</strong>
+                          <span className="badge accent">🌿 {repo.branch || 'main'}</span>
+                          <span className={`badge ${isDirty ? 'warn' : 'ok'}`}>
+                            {isDirty
+                              ? `${repo.dirtyCount} ${repo.dirtyCount === 1 ? 'cambio pendiente' : 'cambios pendientes'}`
+                              : '✓ Limpio'}
+                          </span>
+                          <span className="muted mono" style={{ fontSize: 11.5 }}>
+                            {repo.path}
+                          </span>
+                        </div>
+
+                        <div className="row" style={{ gap: 6 }}>
+                          <button
+                            type="button"
+                            className="btn btn-sm"
+                            onClick={() => handleOpenFolderInExplorer(repo.path)}
+                          >
+                            <FolderOpen size={13} /> Abrir carpeta
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="between" style={{ gap: 8 }}>
+                        <input
+                          type="text"
+                          className="mono"
+                          style={{ flex: 1, fontSize: 12 }}
+                          value={commitMsg}
+                          onChange={(e) =>
+                            setGitMessages((p) => ({ ...p, [repo.path]: e.target.value }))
+                          }
+                          placeholder="Mensaje de commit..."
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          disabled={pushingRepoPath === repo.path}
+                          onClick={() => handleGitQuickCommitPush(repo)}
+                        >
+                          {pushingRepoPath === repo.path
+                            ? '⏳ Subiendo a GitHub...'
+                            : '🚀 Commit + Push a GitHub'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 4. Section 2 — Sincronizador y Respaldo Rápido de Carpetas (Sync Studio) */}
       {showSection('sync') && (
         <div className="card">
@@ -1048,6 +2523,15 @@ export default function ToolsView({ api, state, flash, onQuickConnectKey, onOpen
                   onChange={(e) => setMirrorMode(e.target.checked)}
                 />
                 <span>Modo espejo (eliminar en destino lo que ya no exista en origen)</span>
+              </label>
+
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={autoWatchSync}
+                  onChange={(e) => handleToggleAutoWatchSync(e.target.checked)}
+                />
+                <span>🔄 Auto-Watch en tiempo real</span>
               </label>
 
               <div style={{ minWidth: 240, flex: '0 1 300px' }}>
