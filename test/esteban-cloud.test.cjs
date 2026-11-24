@@ -12,6 +12,12 @@ const { ConfigStore } = require('../electron/config-store.cjs');
 const { EstebanCloudServer, safeResolvePath } = require('../electron/server.cjs');
 const { exportPendriveKit } = require('../electron/kit-exporter.cjs');
 const {
+  turboDownloadFile,
+  selectFastestBaseUrl,
+  httpAgent,
+  httpsAgent
+} = require('../electron/turbo-transfer.cjs');
+const {
   compareSemver,
   downloadFileWithProgress,
   parseGitHubReleaseAsset,
@@ -493,4 +499,91 @@ test('electron/main.cjs: syntax valid and background timer functions are in top-
       `${fnName} must be defined at top level in main.cjs`
     );
   }
+});
+
+test('turbo-transfer: 8-stream parallel HTTP Range reconstruction (18 MB) & LAN route preference', async (t) => {
+  const crypto = require('node:crypto');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecloud-turbo-test-'));
+  const totalBytes = 18 * 1024 * 1024;
+  const payload = crypto.randomBytes(totalBytes);
+  const expectedSha = crypto.createHash('sha256').update(payload).digest('hex');
+
+  const rangeHeadersSeen = [];
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/api/shares') {
+      const body = JSON.stringify({ nodeName: 'TEST-HOST', key: { permissions: 'rw' }, shares: [{ id: 's1', name: 'Videos' }] });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
+      return res.end(body);
+    }
+    if (req.url.startsWith('/api/download')) {
+      if (req.method === 'HEAD') {
+        res.writeHead(200, { 'Content-Length': totalBytes, 'Accept-Ranges': 'bytes' });
+        return res.end();
+      }
+      const range = req.headers.range;
+      if (range) {
+        rangeHeadersSeen.push(range);
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        const start = match && match[1] ? parseInt(match[1], 10) : 0;
+        const end = match && match[2] ? Math.min(parseInt(match[2], 10), totalBytes - 1) : totalBytes - 1;
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${totalBytes}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': (end - start) + 1
+        });
+        return res.end(payload.subarray(start, end + 1));
+      }
+      res.writeHead(200, { 'Content-Length': totalBytes });
+      return res.end(payload);
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  const { port } = srv.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  t.after(() => {
+    try { httpAgent.destroy(); } catch {}
+    try { httpsAgent.destroy(); } catch {}
+    srv.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // 1. Test selectFastestBaseUrl prefers LAN over DNS/Tailscale when both respond
+  const routeRes = await selectFastestBaseUrl(
+    { lanIp: '127.0.0.1', tailscaleDns: 'localhost', port },
+    'test-token',
+    '',
+    port
+  );
+  assert.equal(routeRes.baseUrl, baseUrl);
+  assert.equal(routeRes.routeType, 'lan');
+  assert.equal(routeRes.shares.length, 1);
+
+  // 2. Test 8-stream parallel HTTP Range download & byte-exact SHA-256 reconstruction
+  const destPath = path.join(tmpDir, 'reconstructed.mov');
+  const progressEvents = [];
+  const dlRes = await turboDownloadFile({
+    baseUrl,
+    token: 'test-token',
+    shareId: 's1',
+    relPath: 'video.mov',
+    destPath,
+    fileSize: 0,
+    concurrency: 8,
+    minParallelBytes: 4 * 1024 * 1024,
+    onProgress: (p) => progressEvents.push(p)
+  });
+
+  assert.equal(dlRes.ok, true);
+  assert.equal(dlRes.parallelStreams, 8);
+  assert.equal(rangeHeadersSeen.length, 8);
+  assert.ok(progressEvents.some((p) => p.status === 'completed' && p.percent === 100));
+
+  const downloadedBuf = fs.readFileSync(destPath);
+  assert.equal(downloadedBuf.length, totalBytes);
+  const actualSha = crypto.createHash('sha256').update(downloadedBuf).digest('hex');
+  assert.equal(actualSha, expectedSha);
 });

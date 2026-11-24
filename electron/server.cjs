@@ -11,6 +11,7 @@ const { findLatestLocalRelease, getDefaultUpdateDirs } = require('./updater.cjs'
 const PKG_VERSION = (() => {
   try { return require('../package.json').version || '0.1.5'; } catch { return '0.1.5'; }
 })();
+const STREAM_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4 MB I/O buffer for high-speed streaming
 
 const MIME_MAP = {
   '.html': 'text/html; charset=utf-8',
@@ -167,6 +168,7 @@ class EstebanCloudServer {
     this.boundPort = null;
     this.failedAttempts = new Map(); // ip -> { count, resetAt }
     this.activeSessions = new Map(); // sessionId -> { keyId, expiresAt }
+    this.authCache = new Map(); // authHeader -> { keyId, ts }
     this.recentActivity = [];
   }
 
@@ -210,10 +212,25 @@ class EstebanCloudServer {
 
   authenticateRequest(req) {
     const auth = req.headers.authorization || '';
+    if (auth) {
+      const cached = this.authCache.get(auth);
+      if (cached && (Date.now() - cached.ts) < 30000) {
+        const liveKey = this.store.data.keys.find((k) => k.keyId === cached.keyId && !k.revoked);
+        if (liveKey) return liveKey;
+        this.authCache.delete(auth);
+      }
+    }
+    const cacheKey = (key) => {
+      if (auth && key) {
+        if (this.authCache.size > 200) this.authCache.clear();
+        this.authCache.set(auth, { keyId: key.keyId, ts: Date.now() });
+      }
+      return key;
+    };
     if (auth.startsWith('Bearer ')) {
       const token = auth.slice(7).trim();
       const key = this.findKeyByToken(token);
-      if (key) return key;
+      if (key) return cacheKey(key);
     }
     if (auth.startsWith('Basic ')) {
       try {
@@ -222,7 +239,7 @@ class EstebanCloudServer {
         if (idx >= 0) {
           const pass = decoded.slice(idx + 1);
           const key = this.findKeyByToken(pass);
-          if (key) return key;
+          if (key) return cacheKey(key);
         }
       } catch {
         // ignore malformed basic header
@@ -749,21 +766,22 @@ class EstebanCloudServer {
         return sendJson(res, 400, { error: 'La ruta no es una carpeta.' });
       }
       const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-      const items = [];
-      for (const entry of entries) {
-        try {
-          const full = path.join(dirPath, entry.name);
-          const st = await fs.promises.stat(full);
-          items.push({
-            name: entry.name,
-            isDirectory: st.isDirectory(),
-            size: st.isDirectory() ? null : st.size,
-            mtime: st.mtime.toISOString()
-          });
-        } catch {
-          // Skip unreadable system entries gracefully
-        }
-      }
+      const items = (await Promise.all(
+        entries.map(async (entry) => {
+          try {
+            const full = path.join(dirPath, entry.name);
+            const st = await fs.promises.stat(full);
+            return {
+              name: entry.name,
+              isDirectory: st.isDirectory(),
+              size: st.isDirectory() ? null : st.size,
+              mtime: st.mtime.toISOString()
+            };
+          } catch {
+            return null;
+          }
+        })
+      )).filter(Boolean);
       items.sort((a, b) => {
         if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
         return a.name.localeCompare(b.name, 'es', { sensitivity: 'base' });
@@ -771,7 +789,7 @@ class EstebanCloudServer {
       return sendJson(res, 200, { shareId: share.id, path: relPath, items });
     }
 
-    if (req.method === 'GET' && pathname === '/api/download') {
+    if ((req.method === 'GET' || req.method === 'HEAD') && pathname === '/api/download') {
       const shareId = urlObj.searchParams.get('share');
       const relPath = urlObj.searchParams.get('path') || '';
       const inline = urlObj.searchParams.get('inline') === '1';
@@ -796,7 +814,7 @@ class EstebanCloudServer {
       const destFile = safeResolvePath(share.path, path.posix.join(relPath.replace(/\\/g, '/'), fileName));
       await fs.promises.mkdir(targetDir, { recursive: true });
       await new Promise((resolve, reject) => {
-        const ws = fs.createWriteStream(destFile);
+        const ws = fs.createWriteStream(destFile, { highWaterMark: STREAM_HIGH_WATER_MARK });
         req.pipe(ws);
         ws.on('finish', resolve);
         ws.on('error', reject);
@@ -868,7 +886,8 @@ class EstebanCloudServer {
           'Content-Type': mime,
           'Content-Disposition': disp
         });
-        return fs.createReadStream(filePath, { start, end }).pipe(res);
+        if (req.method === 'HEAD') return res.end();
+        return fs.createReadStream(filePath, { start, end, highWaterMark: STREAM_HIGH_WATER_MARK }).pipe(res);
       }
     }
 
@@ -879,7 +898,7 @@ class EstebanCloudServer {
       'Content-Disposition': disp
     });
     if (req.method === 'HEAD') return res.end();
-    return fs.createReadStream(filePath).pipe(res);
+    return fs.createReadStream(filePath, { highWaterMark: STREAM_HIGH_WATER_MARK }).pipe(res);
   }
 
   async handleWebDav(req, res, pathname) {
@@ -959,16 +978,19 @@ class EstebanCloudServer {
       let responses = makeEntryXml(baseHref, stat, segments[segments.length - 1]);
       if (stat.isDirectory() && depth !== '0') {
         const entries = await fs.promises.readdir(targetPath, { withFileTypes: true });
-        for (const e of entries) {
-          try {
-            const full = path.join(targetPath, e.name);
-            const st = await fs.promises.stat(full);
-            const childHref = `${baseHref.replace(/\/$/, '')}/${encodeURIComponent(e.name)}`;
-            responses += makeEntryXml(childHref, st, e.name);
-          } catch {
-            // Skip inaccessible items
-          }
-        }
+        const xmlParts = await Promise.all(
+          entries.map(async (e) => {
+            try {
+              const full = path.join(targetPath, e.name);
+              const st = await fs.promises.stat(full);
+              const childHref = `${baseHref.replace(/\/$/, '')}/${encodeURIComponent(e.name)}`;
+              return makeEntryXml(childHref, st, e.name);
+            } catch {
+              return '';
+            }
+          })
+        );
+        responses += xmlParts.join('');
       }
       const xml = `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">${responses}</D:multistatus>`;
       res.writeHead(207, { 'Content-Type': 'application/xml; charset=utf-8' });
@@ -988,7 +1010,7 @@ class EstebanCloudServer {
       const existed = fs.existsSync(targetPath);
       await fs.promises.mkdir(path.dirname(targetPath), { recursive: true });
       await new Promise((resolve, reject) => {
-        const ws = fs.createWriteStream(targetPath);
+        const ws = fs.createWriteStream(targetPath, { highWaterMark: STREAM_HIGH_WATER_MARK });
         req.pipe(ws);
         ws.on('finish', resolve);
         ws.on('error', reject);
@@ -1047,6 +1069,15 @@ class EstebanCloudServer {
       const listenHost = host || '0.0.0.0';
       const listenPort = port !== undefined ? Number(port) : Number(this.store.data.port || 4789);
       this.server = http.createServer((req, res) => this.handleRequest(req, res));
+      this.server.keepAliveTimeout = 65000;
+      this.server.headersTimeout = 70000;
+      this.server.requestTimeout = 0;
+      this.server.on('connection', (socket) => {
+        try {
+          socket.setNoDelay(true);
+          socket.setKeepAlive(true, 30000);
+        } catch {}
+      });
       this.server.once('error', reject);
       this.server.listen(listenPort, listenHost, () => {
         const addr = this.server.address();

@@ -100,7 +100,10 @@ async function detectTailscale() {
       dnsName: p.DNSName ? String(p.DNSName).replace(/\.$/, '') : '',
       ip: ((p.TailscaleIPs || []).find((ip) => !ip.includes(':'))) || '',
       online: Boolean(p.Online),
-      os: p.OS || ''
+      os: p.OS || '',
+      curAddr: p.CurAddr || '',
+      relay: p.Relay || '',
+      isDirect: Boolean(p.CurAddr)
     }));
     return {
       installed: true,
@@ -236,8 +239,21 @@ class MountManager {
       '--webdav-user', keyId || 'esteban-cloud',
       '--webdav-pass', obs.stdout,
       '--vfs-cache-mode', 'full',
-      '--vfs-cache-max-age', '30m',
-      '--dir-cache-time', '15s',
+      '--vfs-cache-max-size', '20G',
+      '--vfs-cache-max-age', '24h',
+      '--vfs-read-chunk-size', '16M',
+      '--vfs-read-chunk-size-limit', '256M',
+      '--vfs-read-chunk-streams', '8',
+      '--buffer-size', '64M',
+      '--vfs-read-ahead', '128M',
+      '--transfers', '16',
+      '--checkers', '32',
+      '--vfs-fast-fingerprint',
+      '--vfs-write-back', '1s',
+      '--no-modtime',
+      '--attr-timeout', '30s',
+      '--dir-cache-time', '60s',
+      '--network-mode',
       '--volname', volName,
       '--no-console'
     ];

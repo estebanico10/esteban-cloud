@@ -14,6 +14,12 @@ const { ConfigStore, defaultConfigDir } = require('./config-store.cjs');
 const { generateKeyBundle, decryptKeyBundle } = require('./crypto-keys.cjs');
 const { EstebanCloudServer } = require('./server.cjs');
 const { checkEnvironment, MountManager, syncSshAuthorizedKeys, launchElevatedInstaller } = require('./system-tools.cjs');
+const {
+  selectFastestBaseUrl,
+  optimizeTailscaleDirectPath,
+  turboDownloadFile,
+  turboUploadBatch
+} = require('./turbo-transfer.cjs');
 const { locateInstallerExe, exportPendriveKit } = require('./kit-exporter.cjs');
 const {
   compareSemver,
@@ -324,34 +330,19 @@ function httpJsonRequest(targetUrl, { method = 'GET', headers = {}, body = null,
 }
 
 async function resolveReachableBaseUrl(hostInfo, token, overrideBaseUrl) {
-  const candidates = [];
-  if (overrideBaseUrl) {
-    const trimmed = String(overrideBaseUrl).trim().replace(/\/$/, '');
-    if (!/^https?:\/\/.+/i.test(trimmed)) {
-      throw new Error('La URL manual debe comenzar con http:// o https:// (o déjala vacía para detección automática por Tailscale).');
+  const best = await selectFastestBaseUrl(hostInfo, token, overrideBaseUrl, 4789);
+  return {
+    baseUrl: best.baseUrl,
+    sharesResponse: best.sharesResponse,
+    routeInfo: {
+      routeType: best.routeType,
+      latencyMs: best.latencyMs,
+      relay: best.relay,
+      curAddr: best.curAddr,
+      baseUrl: best.baseUrl,
+      candidates: best.candidates
     }
-    candidates.push(trimmed);
-  } else {
-    const port = Number(hostInfo.port) || 4789;
-    if (hostInfo.tailscaleIp) candidates.push(`http://${hostInfo.tailscaleIp}:${port}`);
-    if (hostInfo.tailscaleDns) candidates.push(`http://${hostInfo.tailscaleDns}:${port}`);
-    if (hostInfo.lanIp) candidates.push(`http://${hostInfo.lanIp}:${port}`);
-    candidates.push(`http://127.0.0.1:${port}`);
-  }
-
-  let lastErr = new Error('No se encontró dirección alcanzable en la llave.');
-  for (const baseUrl of candidates) {
-    try {
-      const res = await httpJsonRequest(`${baseUrl}/api/shares`, {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 4500
-      });
-      return { baseUrl, sharesResponse: res.data };
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr;
+  };
 }
 
 async function buildFullState() {
@@ -410,7 +401,8 @@ async function buildFullState() {
       label: s.label,
       nodeName: s.nodeName,
       permissions: s.permissions,
-      shares: s.shares
+      shares: s.shares,
+      routeInfo: s.routeInfo || null
     }))
   };
 }
@@ -655,23 +647,28 @@ function registerIpc() {
         fileName: backupName
       });
     } catch {}
-    const { baseUrl, sharesResponse } = await resolveReachableBaseUrl(payload.host || {}, payload.token, overrideBaseUrl);
+    const { baseUrl, sharesResponse, routeInfo } = await resolveReachableBaseUrl(payload.host || {}, payload.token, overrideBaseUrl);
     const sessionId = `sess-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const nodeName = sharesResponse.nodeName || (payload.host && payload.host.nodeName) || 'Nodo remoto';
+    const permissions = (sharesResponse.key && sharesResponse.key.permissions) || payload.permissions;
+    const shares = sharesResponse.shares || [];
     clientSessions.set(sessionId, {
       baseUrl,
+      overrideBaseUrl: overrideBaseUrl || '',
       keyId: payload.keyId,
       label: payload.label,
-      nodeName: sharesResponse.nodeName || (payload.host && payload.host.nodeName) || 'Nodo remoto',
-      permissions: (sharesResponse.key && sharesResponse.key.permissions) || payload.permissions,
+      nodeName,
+      permissions,
       token: payload.token,
       host: payload.host || {},
-      shares: sharesResponse.shares || []
+      shares,
+      routeInfo
     });
 
     if (saveBookmark) {
       store.savePeer({
         label: payload.label,
-        nodeName: sharesResponse.nodeName || (payload.host && payload.host.nodeName),
+        nodeName,
         tailscaleIp: payload.host && payload.host.tailscaleIp,
         lanIp: payload.host && payload.host.lanIp,
         port: payload.host && payload.host.port,
@@ -694,9 +691,10 @@ function registerIpc() {
         baseUrl,
         keyId: payload.keyId,
         label: payload.label,
-        nodeName: sharesResponse.nodeName || (payload.host && payload.host.nodeName) || 'Nodo remoto',
-        permissions: (sharesResponse.key && sharesResponse.key.permissions) || payload.permissions,
-        shares: sharesResponse.shares || []
+        nodeName,
+        permissions,
+        shares,
+        routeInfo
       },
       state: await buildFullState()
     };
@@ -739,62 +737,64 @@ function registerIpc() {
     return res.data;
   });
 
-  ipcMain.handle('client:downloadFile', async (_e, { sessionId, shareId, relPath, fileName }) => {
+  ipcMain.handle('client:downloadFile', async (_e, { sessionId, shareId, relPath, fileName, fileSize, size }) => {
     const sess = clientSessions.get(sessionId);
     if (!sess) throw new Error('Sesión remota no activa.');
     const saveRes = await dialog.showSaveDialog(mainWindow, {
-      title: 'Guardar archivo descargado',
+      title: 'Guardar archivo descargado (Motor Turbo 8x)',
       defaultPath: fileName || path.basename(relPath)
     });
     if (saveRes.canceled || !saveRes.filePath) return { canceled: true };
     const dest = saveRes.filePath;
-    const u = new URL(`${sess.baseUrl}/api/download?share=${encodeURIComponent(shareId)}&path=${encodeURIComponent(relPath)}`);
-    const lib = u.protocol === 'https:' ? https : http;
-    await new Promise((resolve, reject) => {
-      const req = lib.request(u, { method: 'GET', headers: { Authorization: `Bearer ${sess.token}` } }, (res) => {
-        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-        const ws = fs.createWriteStream(dest);
-        res.pipe(ws);
-        ws.on('finish', resolve);
-        ws.on('error', reject);
-      });
-      req.on('error', reject);
-      req.end();
+    const dlResult = await turboDownloadFile({
+      baseUrl: sess.baseUrl,
+      token: sess.token,
+      shareId,
+      relPath,
+      destPath: dest,
+      fileSize: Number(fileSize || size) || 0,
+      concurrency: 8,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('cloud:transferProgress', {
+            ...p,
+            routeType: (sess.routeInfo && sess.routeInfo.routeType) || 'unknown',
+            nodeName: sess.nodeName
+          });
+        }
+      }
     });
-    return { canceled: false, savedPath: dest };
+    server.log('info', `Descarga Turbo (${dlResult.parallelStreams}x streams · ${dlResult.speedMBs} MB/s): ${fileName || path.basename(relPath)}`);
+    return { canceled: false, savedPath: dest, ...dlResult };
   });
 
   ipcMain.handle('client:uploadFiles', async (_e, { sessionId, shareId, relPath }) => {
     const sess = clientSessions.get(sessionId);
     if (!sess) throw new Error('Sesión remota no activa.');
     const pick = await dialog.showOpenDialog(mainWindow, {
-      title: 'Seleccionar archivos para subir al equipo remoto',
+      title: 'Seleccionar archivos para subir al equipo remoto (Motor Turbo)',
       properties: ['openFile', 'multiSelections']
     });
     if (pick.canceled || !pick.filePaths.length) return { canceled: true, uploaded: [] };
-    const uploaded = [];
-    for (const filePath of pick.filePaths) {
-      const name = path.basename(filePath);
-      const u = new URL(`${sess.baseUrl}/api/upload?share=${encodeURIComponent(shareId)}&path=${encodeURIComponent(relPath || '')}&name=${encodeURIComponent(name)}`);
-      const lib = u.protocol === 'https:' ? https : http;
-      await new Promise((resolve, reject) => {
-        const req = lib.request(u, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${sess.token}` }
-        }, (res) => {
-          const chunks = [];
-          res.on('data', (c) => chunks.push(c));
-          res.on('end', () => {
-            if (res.statusCode >= 200 && res.statusCode < 300) resolve();
-            else reject(new Error(`Error subiendo ${name}: HTTP ${res.statusCode}`));
+    const upResult = await turboUploadBatch({
+      baseUrl: sess.baseUrl,
+      token: sess.token,
+      shareId,
+      remoteDir: relPath || '',
+      filePaths: pick.filePaths,
+      concurrency: 4,
+      onProgress: (p) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('cloud:transferProgress', {
+            ...p,
+            routeType: (sess.routeInfo && sess.routeInfo.routeType) || 'unknown',
+            nodeName: sess.nodeName
           });
-        });
-        req.on('error', reject);
-        fs.createReadStream(filePath).pipe(req);
-      });
-      uploaded.push(name);
-    }
-    return { canceled: false, uploaded };
+        }
+      }
+    });
+    server.log('info', `Subida Turbo (${upResult.speedMBs} MB/s): ${upResult.uploaded.join(', ')}`);
+    return { canceled: false, uploaded: upResult.uploaded, speedMBs: upResult.speedMBs };
   });
 
   ipcMain.handle('client:renameItem', async (_e, { sessionId, shareId, from, to }) => {
@@ -811,6 +811,9 @@ function registerIpc() {
   ipcMain.handle('client:mountDrive', async (_e, { sessionId, driveLetter }) => {
     const sess = clientSessions.get(sessionId);
     if (!sess) throw new Error('Sesión remota no activa.');
+    if (sess.routeInfo && sess.routeInfo.routeType === 'tailscale-relay') {
+      optimizeTailscaleDirectPath(sess.baseUrl).catch(() => {});
+    }
     const mounted = await mountManager.mountWebDav({
       driveLetter: driveLetter || 'Z:',
       label: `EstebanCloud-${sess.nodeName}`,
@@ -820,6 +823,49 @@ function registerIpc() {
     });
     refreshTrayMenu();
     return { mounted, state: await buildFullState() };
+  });
+
+  ipcMain.handle('client:optimizeRoute', async (_e, { sessionId, remountDriveLetter } = {}) => {
+    const sess = clientSessions.get(sessionId);
+    if (!sess) throw new Error('Sesión remota no activa.');
+    const prevBase = sess.baseUrl;
+    if (sess.host && sess.host.tailscaleIp) {
+      await optimizeTailscaleDirectPath(sess.host.tailscaleIp).catch(() => {});
+    }
+    await optimizeTailscaleDirectPath(prevBase).catch(() => {});
+    const best = await resolveReachableBaseUrl(sess.host || {}, sess.token, sess.overrideBaseUrl || '');
+    sess.baseUrl = best.baseUrl;
+    sess.routeInfo = best.routeInfo;
+    sess.shares = (best.sharesResponse && best.sharesResponse.shares) || sess.shares;
+
+    const remounted = [];
+    const activeMounts = mountManager.listMounts();
+    for (const m of activeMounts) {
+      const cleanPrev = String(prevBase || '').replace(/\/$/, '').toLowerCase();
+      const matchesSession = remountDriveLetter
+        ? m.drive.toUpperCase() === String(remountDriveLetter).toUpperCase()
+        : (m.url.toLowerCase().startsWith(cleanPrev) || m.label.toLowerCase().includes(String(sess.nodeName || '').toLowerCase().slice(0, 12)));
+      if (matchesSession) {
+        await mountManager.unmount(m.drive);
+        await new Promise((r) => setTimeout(r, 600));
+        const nextMount = await mountManager.mountWebDav({
+          driveLetter: m.drive,
+          label: m.label,
+          baseUrl: sess.baseUrl,
+          keyId: sess.keyId,
+          token: sess.token
+        });
+        remounted.push(nextMount);
+      }
+    }
+    refreshTrayMenu();
+    server.log('info', `Ruta optimizada para ${sess.nodeName}: ${sess.routeInfo.routeType} (${sess.baseUrl}, ${sess.routeInfo.latencyMs}ms)`);
+    return {
+      baseUrl: sess.baseUrl,
+      routeInfo: sess.routeInfo,
+      remounted,
+      state: await buildFullState()
+    };
   });
 
   ipcMain.handle('client:unmountDrive', async (_e, driveLetter) => {

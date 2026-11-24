@@ -34,7 +34,8 @@ import {
   Bookmark,
   Package,
   Activity,
-  MessageSquare
+  MessageSquare,
+  Zap
 } from 'lucide-react';
 import MetricsView from './components/MetricsView.jsx';
 import ChatView from './components/ChatView.jsx';
@@ -134,6 +135,7 @@ export default function App() {
   // Updates state
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateProgress, setUpdateProgress] = useState(null);
+  const [transferProgress, setTransferProgress] = useState(null);
   const [unreadChats, setUnreadChats] = useState(0);
 
   // Pendrive Kit exporter state
@@ -169,6 +171,7 @@ export default function App() {
       api.getState().then(setState).catch(() => {});
     });
     const unsubUpd = api.onUpdateProgress ? api.onUpdateProgress((p) => setUpdateProgress(p)) : null;
+    const unsubTransfer = api.onTransferProgress ? api.onTransferProgress((p) => setTransferProgress(p)) : null;
     const unsubAvail = api.onUpdateAvailable ? api.onUpdateAvailable((info) => setUpdateInfo(info)) : null;
     const unsubChat = api.onChatEvent ? api.onChatEvent((evt) => {
       if (evt && typeof evt.totalUnread === 'number') setUnreadChats(evt.totalUnread);
@@ -180,6 +183,7 @@ export default function App() {
     return () => {
       unsubLog && unsubLog();
       unsubUpd && unsubUpd();
+      unsubTransfer && unsubTransfer();
       unsubAvail && unsubAvail();
       unsubChat && unsubChat();
     };
@@ -402,12 +406,47 @@ export default function App() {
     try {
       const res = await api.mountDrive({ sessionId: activeSession.sessionId, driveLetter });
       setState(res.state);
-      flash('ok', `Unidad ${res.mounted.drive} montada. Ya puedes abrirla en el Explorador de Windows.`);
+      flash('ok', `Unidad ${res.mounted.drive} montada en Modo Turbo 8x. Ya puedes abrirla en el Explorador de Windows.`);
     } catch (err) {
       flash('error', err.message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleOptimizeRoute = async () => {
+    if (!activeSession) return;
+    setBusy(true);
+    try {
+      const res = await api.optimizeRoute({ sessionId: activeSession.sessionId });
+      setState(res.state);
+      const rInfo = res.routeInfo || {};
+      const routeText = rInfo.routeType === 'lan'
+        ? `Ruta LAN Directa (${rInfo.latencyMs} ms)`
+        : rInfo.routeType === 'tailscale-direct'
+          ? `Tailscale UDP Directo P2P (${rInfo.latencyMs} ms)`
+          : `Tailscale Relay "${rInfo.relay || 'DERP'}" (${rInfo.latencyMs || '?'} ms)`;
+      const remountMsg = res.remounted?.length ? ` · Disco(s) ${res.remounted.map((m) => m.drive).join(', ')} remontados en Turbo 8x.` : '';
+      flash('ok', `Ruta optimizada para ${activeSession.nodeName}: ${routeText} → ${res.baseUrl}${remountMsg}`);
+    } catch (err) {
+      flash('error', err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renderRouteBadge = (routeInfo) => {
+    if (!routeInfo) return null;
+    if (routeInfo.routeType === 'lan') {
+      return <span className="badge ok">🟢 Ruta LAN Directa (Ultra Rápida · {routeInfo.latencyMs || 1} ms)</span>;
+    }
+    if (routeInfo.routeType === 'tailscale-direct') {
+      return <span className="badge ok">🟢 Tailscale UDP Directo (P2P · {routeInfo.latencyMs || '?'} ms)</span>;
+    }
+    if (routeInfo.routeType === 'tailscale-relay') {
+      return <span className="badge warn">🟠 Tailscale Relay DERP "{routeInfo.relay || '?'}" (Lento · {routeInfo.latencyMs || '?'} ms)</span>;
+    }
+    return <span className="badge accent">🔵 Ruta Activa ({routeInfo.latencyMs || '?'} ms)</span>;
   };
 
   const handleInstallDeps = async () => {
@@ -573,6 +612,29 @@ export default function App() {
           </div>
         )}
 
+        {transferProgress && (
+          <div className="banner ok" style={{ borderColor: 'rgba(56, 189, 248, 0.45)', background: 'rgba(14, 165, 233, 0.12)' }}>
+            <div className="between" style={{ gap: 8, flexWrap: 'wrap' }}>
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                <Zap size={16} color="#38bdf8" />
+                <strong>
+                  Motor Turbo {transferProgress.parallelStreams || 1}x · {transferProgress.mode === 'upload' ? 'Subiendo' : 'Descargando'}: {transferProgress.fileName}
+                </strong>
+                <span className="badge ok" style={{ fontWeight: 700 }}>{transferProgress.speedMBs || 0} MB/s</span>
+                <span className="mono muted" style={{ fontSize: 12 }}>
+                  {transferProgress.percent || 0}% ({fmtSize(transferProgress.transferredBytes)} / {fmtSize(transferProgress.totalBytes)})
+                </span>
+              </div>
+              {transferProgress.status === 'completed' && (
+                <button className="btn btn-sm" onClick={() => setTransferProgress(null)}>Cerrar</button>
+              )}
+            </div>
+            <div className="strength-bar" style={{ marginTop: 8 }}>
+              <div className="strength-fill" style={{ width: `${transferProgress.percent || 0}%`, background: 'linear-gradient(90deg, #38bdf8, #34d399)' }} />
+            </div>
+          </div>
+        )}
+
         {notice && (
           <div className={`banner ${notice.type === 'error' ? 'error' : notice.type === 'ok' ? 'ok' : ''}`}>
             <div className="between">
@@ -701,7 +763,7 @@ export default function App() {
               <div className="card">
                 <h2><Smartphone size={17} /> App Nativa Android (APK) y Super-App Móvil</h2>
                 <p className="muted">
-                  Escanea el QR con tu celular para abrir la Super-App móvil (Archivos, AirDrop, Pantalla Remota, Chat, Portapapeles y Bóveda) o descargar e instalar el <strong>APK nativo de Android (<code>Esteban-Cloud-0.4.0.apk</code>)</strong>.
+                  Escanea el QR con tu celular para abrir la Super-App móvil (Archivos, AirDrop, Pantalla Remota, Chat, Portapapeles y Bóveda) o descargar e instalar el <strong>APK nativo de Android (<code>Esteban-Cloud-{state.appVersion}.apk</code>)</strong>.
                 </p>
                 {urls.tailscaleUrl ? (
                   <div className="qr-card">
@@ -1476,21 +1538,44 @@ export default function App() {
 
                 {activeSession && (
                   <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-                    <div className="between" style={{ marginBottom: 8 }}>
+                    <div className="between" style={{ marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
                       <div>
                         <strong>Sesión activa: {activeSession.nodeName}</strong>
-                        <div className="muted mono">{activeSession.baseUrl}</div>
+                        <div className="row" style={{ gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                          <span className="muted mono">{activeSession.baseUrl}</span>
+                          {renderRouteBadge(activeSession.routeInfo)}
+                        </div>
                       </div>
-                      <button className="btn btn-sm btn-danger" onClick={async () => setState(await api.disconnectClient(activeSession.sessionId))}>
-                        Desconectar
-                      </button>
+                      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                        <button className="btn btn-sm" onClick={handleOptimizeRoute} disabled={busy} title="Fuerza ruta LAN o Tailscale UDP directo y remonta discos en Turbo 8x">
+                          <Zap size={13} /> Optimizar Ruta + Turbo 8x
+                        </button>
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => {
+                            try {
+                              const host = new URL(activeSession.baseUrl).hostname;
+                              api.openSmbShare(host);
+                              flash('ok', `Abriendo recurso nativo Windows SMB \\\\${host}`);
+                            } catch (err) {
+                              flash('error', err.message);
+                            }
+                          }}
+                          title="Abre carpetas compartidas nativas de Windows SMB para máxima velocidad LAN"
+                        >
+                          <FolderOpen size={13} /> SMB Nativo Windows
+                        </button>
+                        <button className="btn btn-sm btn-danger" onClick={async () => setState(await api.disconnectClient(activeSession.sessionId))}>
+                          Desconectar
+                        </button>
+                      </div>
                     </div>
                     <div className="row">
                       <select style={{ width: 96 }} value={driveLetter} onChange={(e) => setDriveLetter(e.target.value)}>
                         {['Z:', 'Y:', 'X:', 'W:', 'V:', 'U:'].map((d) => <option key={d} value={d}>{d}</option>)}
                       </select>
                       <button className="btn btn-primary" onClick={handleMountDrive} disabled={busy}>
-                        <HardDrive size={15} /> Montar como disco {driveLetter}
+                        <HardDrive size={15} /> Montar disco {driveLetter} (Turbo 8x)
                       </button>
                     </div>
                   </div>
@@ -1543,8 +1628,14 @@ export default function App() {
 
             {activeSession && (
               <div className="card">
-                <div className="between">
-                  <h2>Explorador remoto integrado · {activeSession.nodeName}</h2>
+                <div className="between" style={{ flexWrap: 'wrap', gap: 10 }}>
+                  <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                    <h2>Explorador remoto integrado · {activeSession.nodeName}</h2>
+                    {renderRouteBadge(activeSession.routeInfo)}
+                    <button className="btn btn-sm" onClick={handleOptimizeRoute} disabled={busy}>
+                      <Zap size={13} /> Optimizar Ruta + Turbo 8x
+                    </button>
+                  </div>
                   {activeRemoteShare && (
                     <div className="row">
                       <div style={{ position: 'relative', width: 200 }}>
@@ -1643,11 +1734,17 @@ export default function App() {
                                 <button
                                   className="btn btn-sm"
                                   onClick={async () => {
-                                    const r = await api.downloadRemoteFile({ sessionId: activeSession.sessionId, shareId: activeRemoteShare.id, relPath: full, fileName: it.name });
-                                    if (!r.canceled) flash('ok', `Descargado en ${r.savedPath}`);
+                                    const r = await api.downloadRemoteFile({
+                                      sessionId: activeSession.sessionId,
+                                      shareId: activeRemoteShare.id,
+                                      relPath: full,
+                                      fileName: it.name,
+                                      fileSize: it.size
+                                    });
+                                    if (!r.canceled) flash('ok', `Descargado en ${r.savedPath}${r.speedMBs ? ` (${r.speedMBs} MB/s · ${r.parallelStreams || 1}x)` : ''}`);
                                   }}
                                 >
-                                  <Download size={13} /> Descargar
+                                  <Download size={13} /> Descargar Turbo
                                 </button>
                               )}
                               {activeRemoteShare.effectiveMode === 'rw' && (

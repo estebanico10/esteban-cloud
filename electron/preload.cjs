@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld('estebanCloud', {
   downloadRemoteFile: (payload) => ipcRenderer.invoke('client:downloadFile', payload),
   uploadRemoteFiles: (payload) => ipcRenderer.invoke('client:uploadFiles', payload),
   mountDrive: (payload) => ipcRenderer.invoke('client:mountDrive', payload),
+  optimizeRoute: (payload) => ipcRenderer.invoke('client:optimizeRoute', payload),
   unmountDrive: (driveLetter) => ipcRenderer.invoke('client:unmountDrive', driveLetter),
   openDrive: (driveLetter) => ipcRenderer.invoke('client:openDrive', driveLetter),
   removePeer: (id) => ipcRenderer.invoke('client:removePeer', id),
@@ -107,6 +108,12 @@ contextBridge.exposeInMainWorld('estebanCloud', {
     const handler = (_event, progress) => cb(progress);
     ipcRenderer.on('cloud:updateProgress', handler);
     return () => ipcRenderer.removeListener('cloud:updateProgress', handler);
+  },
+
+  onTransferProgress: (cb) => {
+    const handler = (_event, progress) => cb(progress);
+    ipcRenderer.on('cloud:transferProgress', handler);
+    return () => ipcRenderer.removeListener('cloud:transferProgress', handler);
   },
 
   onLog: (cb) => {
