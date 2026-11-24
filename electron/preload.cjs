@@ -64,6 +64,18 @@ contextBridge.exposeInMainWorld('estebanCloud', {
   mountDrive: (payload) => ipcRenderer.invoke('client:mountDrive', payload),
   optimizeRoute: (payload) => ipcRenderer.invoke('client:optimizeRoute', payload),
   unmountDrive: (driveLetter) => ipcRenderer.invoke('client:unmountDrive', driveLetter),
+
+  optimizeMemoryNow: () => ipcRenderer.invoke('memory:optimizeNow'),
+  setUltraLightMode: (enabled) => ipcRenderer.invoke('memory:setUltraLightMode', enabled),
+  createPairingCode: () => ipcRenderer.invoke('pairing:createCode'),
+  connectWithPairingCode: (payload) => ipcRenderer.invoke('pairing:connectWithCode', payload),
+  getMiniInternetState: () => ipcRenderer.invoke('mini:getState'),
+  upsertNetwork: (net) => ipcRenderer.invoke('mini:upsertNetwork', net),
+  deleteNetwork: (id) => ipcRenderer.invoke('mini:deleteNetwork', id),
+  openMiniPortal: (payload) => ipcRenderer.invoke('mini:openPortal', payload),
+  upsertPackage: (pkg) => ipcRenderer.invoke('mini:upsertPackage', pkg),
+  deletePackage: (id) => ipcRenderer.invoke('mini:deletePackage', id),
+  executeSmartPackage: (payload) => ipcRenderer.invoke('mini:executePackage', payload),
   openDrive: (driveLetter) => ipcRenderer.invoke('client:openDrive', driveLetter),
   removePeer: (id) => ipcRenderer.invoke('client:removePeer', id),
 

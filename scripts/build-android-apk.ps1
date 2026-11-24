@@ -49,7 +49,7 @@ $linkArgs = @(
   "-A", "$AndroidAppDir\assets",
   "--min-sdk-version", "24",
   "--target-sdk-version", "34",
-  "--version-code", "5",
+  "--version-code", "6",
   "--version-name", $ver,
   "--auto-add-overlay"
 ) + $flatFiles

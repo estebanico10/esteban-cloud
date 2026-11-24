@@ -22,6 +22,12 @@ const {
 } = require('./turbo-transfer.cjs');
 const { locateInstallerExe, exportPendriveKit } = require('./kit-exporter.cjs');
 const {
+  optimizeProcessMemory,
+  MagicPairingManager,
+  MiniInternetStore,
+  redeemRemotePairingCode
+} = require('./mini-internet.cjs');
+const {
   compareSemver,
   findLatestLocalRelease,
   getDefaultUpdateDirs,
@@ -57,6 +63,13 @@ const {
   gitQuickCommitPush
 } = require('./tools.cjs');
 
+// Reduce V8 heap and Chromium background renderer overhead for low-RAM efficiency
+try {
+  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=192 --optimize-for-size --expose-gc');
+  app.commandLine.appendSwitch('renderer-process-limit', '2');
+  app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess');
+} catch {}
+
 // Prevent duplicate instances competing for port 4789 (EADDRINUSE)
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -89,6 +102,9 @@ const store = new ConfigStore();
 const chatStore = new ChatStore();
 const clipboardStore = new ClipboardHistoryStore(path.join(defaultConfigDir(), 'clipboard-history.json'));
 const vaultStore = new EncryptedVaultStore(path.join(defaultConfigDir(), 'secret-vault.json'));
+const pairingManager = new MagicPairingManager();
+const miniInternetStore = new MiniInternetStore(path.join(defaultConfigDir(), 'mini-internet.json'));
+let lastMemoryStats = null;
 let keepAwakeBlockerId = null;
 
 function normalizeMetricsShape(m) {
@@ -163,7 +179,20 @@ const server = new EstebanCloudServer(store, {
   onSystemAction: async (action, payload) => executeQuickSystemAction(action, payload),
   onVaultList: () => vaultStore.listItems(),
   onVaultUpsert: (item) => vaultStore.upsertItem(item),
-  onVaultDelete: (id) => { vaultStore.deleteItem(id); return true; }
+  onVaultDelete: (id) => { vaultStore.deleteItem(id); return true; },
+  pairingManager,
+  miniInternetStore,
+  onPackageExecute: async ({ pkgOrId, senderNode }) => {
+    const res = await miniInternetStore.executePackageLocally(pkgOrId, {
+      configStore: store,
+      openExternalFn: (u) => {
+        if (typeof u === 'string' && /^https?:\/\//i.test(u)) return shell.openExternal(u);
+      },
+      openPathFn: (p) => shell.openPath(p)
+    });
+    sendWindowsNotification(`Paquete recibido de ${senderNode || 'Malla'}`, `${res.title} ejecutado.`);
+    return res;
+  }
 });
 const mountManager = new MountManager({
   onLog: (entry) => {
@@ -299,7 +328,18 @@ function createWindow() {
   mainWindow.on('close', (e) => {
     if (!isQuitting && store.data.minimizeToTray) {
       e.preventDefault();
+      try { mainWindow.webContents.session.clearCache().catch(() => {}); } catch {}
       mainWindow.hide();
+      if (store.data.ultraLightTrayMode) {
+        const w = mainWindow;
+        mainWindow = null;
+        setTimeout(() => {
+          try { if (w && !w.isDestroyed()) w.destroy(); } catch {}
+          optimizeProcessMemory({ aggressive: true }).then((s) => { lastMemoryStats = s; }).catch(() => {});
+        }, 80);
+      } else {
+        optimizeProcessMemory({ aggressive: false }).then((s) => { lastMemoryStats = s; }).catch(() => {});
+      }
     }
   });
 }
@@ -394,6 +434,11 @@ async function buildFullState() {
     urls: { tailscaleUrl, lanUrl, tailscaleQr, lanQr },
     mounts: mountManager.listMounts(),
     totalUnread: chatStore.getTotalUnread(),
+    memoryStats: lastMemoryStats,
+    miniInternet: {
+      networks: miniInternetStore.listNetworks(),
+      packages: miniInternetStore.listPackages()
+    },
     activeClientSessions: Array.from(clientSessions.entries()).map(([id, s]) => ({
       sessionId: id,
       baseUrl: s.baseUrl,
@@ -1962,6 +2007,248 @@ function registerUpdatesMetricsAndChatIpc() {
   ipcMain.handle('tools:gitQuickCommitPush', async (_e, { repoDir, message } = {}) => {
     return gitQuickCommitPush({ repoDir, message });
   });
+
+  registerMiniInternetAndMemoryIpc();
+}
+
+function registerMiniInternetAndMemoryIpc() {
+  ipcMain.handle('memory:optimizeNow', async () => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await mainWindow.webContents.session.clearCache();
+      }
+    } catch {}
+    const stats = await optimizeProcessMemory({ aggressive: true });
+    lastMemoryStats = stats;
+    return { ...stats, state: await buildFullState() };
+  });
+
+  ipcMain.handle('memory:setUltraLightMode', async (_e, enabled) => {
+    store.updateSettings({ ultraLightTrayMode: Boolean(enabled) });
+    return buildFullState();
+  });
+
+  ipcMain.handle('pairing:createCode', async () => {
+    const env = await checkEnvironment();
+    const port = server.boundPort || store.data.port || 4789;
+    const hostUrls = [];
+    if (env.lanIp) hostUrls.push(`http://${env.lanIp}:${port}`);
+    if (env.tailscale.ip) hostUrls.push(`http://${env.tailscale.ip}:${port}`);
+
+    const localKeysDir = path.join(defaultConfigDir(), 'keys');
+    const detected = scanAllAvailableKeys({
+      usbDrives: env.usbDrives || [],
+      extraDirs: [localKeysDir],
+      keyVault: store.data.keyVault || {},
+      authorizedKeys: store.data.keys || []
+    });
+
+    let chosen = detected.find((k) => k.isLocalHostKey && !k.revoked && k.bundleJson && k.passphrase)
+      || detected.find((k) => k.isLocalHostKey && !k.revoked && k.bundleJson);
+
+    let bundleJson = chosen ? chosen.bundleJson : '';
+    let passphrase = (chosen && (chosen.passphrase || (store.data.keyVault?.[chosen.keyId]?.passphrase))) || '';
+    let label = chosen ? chosen.label : 'Emparejamiento Mágico Total';
+
+    if (!bundleJson) {
+      const randPass = `EC-${require('crypto').randomBytes(4).toString('hex').toUpperCase()}`;
+      const hostInfo = {
+        nodeName: store.data.nodeName,
+        tailscaleIp: env.tailscale.ip,
+        tailscaleDns: env.tailscale.dnsName,
+        lanIp: env.lanIp,
+        port: store.data.port,
+        sshUser: env.userName
+      };
+      const gen = generateKeyBundle({ label, permissions: 'rw', shareIds: ['*'], hostInfo, passphrase: randPass });
+      store.addKeyRecord(gen.hostRecord);
+      const fileName = `Magica_${gen.keyId}.ecloudkey`;
+      fs.mkdirSync(localKeysDir, { recursive: true });
+      fs.writeFileSync(path.join(localKeysDir, fileName), gen.bundleJson, 'utf8');
+      store.saveKeyVaultEntry({
+        keyId: gen.keyId,
+        passphrase: randPass,
+        label,
+        nodeName: store.data.nodeName,
+        permissions: 'rw',
+        shareIds: ['*'],
+        fileName
+      });
+      syncSshAuthorizedKeys(store.data.keys);
+      bundleJson = gen.bundleJson;
+      passphrase = randPass;
+    }
+
+    return pairingManager.createPairingInvite({
+      bundleJson,
+      passphrase,
+      label,
+      nodeName: store.data.nodeName,
+      hostUrls
+    });
+  });
+
+  ipcMain.handle('pairing:connectWithCode', async (_e, { code, targetHost } = {}) => {
+    const cleanCode = String(code || '').trim();
+    if (!cleanCode) throw new Error('Ingresa el código mágico (ej. EC-7K9P).');
+    const port = store.data.port || 4789;
+    const candidates = [];
+    if (targetHost && String(targetHost).trim()) {
+      const raw = String(targetHost).trim().replace(/\/$/, '');
+      candidates.push(/^https?:\/\//i.test(raw) ? raw : `http://${raw.includes(':') ? raw : `${raw}:${port}`}`);
+    } else {
+      const env = await checkEnvironment();
+      for (const tp of (env.tailscale.peers || [])) {
+        if (tp.online && tp.ip) candidates.push(`http://${tp.ip}:${port}`);
+      }
+      for (const sp of (store.data.savedPeers || [])) {
+        const spPort = Number(sp.port) || port;
+        if (sp.lanIp) candidates.push(`http://${sp.lanIp}:${spPort}`);
+        if (sp.tailscaleIp) candidates.push(`http://${sp.tailscaleIp}:${spPort}`);
+      }
+      candidates.push(`http://127.0.0.1:${port}`);
+    }
+
+    const claimed = await redeemRemotePairingCode({ code: cleanCode, candidateUrls: candidates });
+    if (!claimed.passphrase) {
+      throw new Error('La llave fue recibida pero no incluye contraseña guardada; cárgala manualmente en el formulario.');
+    }
+
+    const payload = decryptKeyBundle(claimed.bundleJson, claimed.passphrase);
+    const localKeysDir = path.join(defaultConfigDir(), 'keys');
+    fs.mkdirSync(localKeysDir, { recursive: true });
+    const backupName = `${String(payload.label || 'llave').replace(/[^a-zA-Z0-9_-]+/g, '_')}_${payload.keyId}.ecloudkey`;
+    fs.writeFileSync(path.join(localKeysDir, backupName), claimed.bundleJson, 'utf8');
+    store.saveKeyVaultEntry({
+      keyId: payload.keyId,
+      passphrase: claimed.passphrase,
+      label: payload.label,
+      nodeName: (payload.host && payload.host.nodeName) || claimed.nodeName || '',
+      permissions: payload.permissions || 'rw',
+      shareIds: payload.shareIds || ['*'],
+      fileName: backupName
+    });
+
+    const { baseUrl, sharesResponse, routeInfo } = await resolveReachableBaseUrl(payload.host || {}, payload.token, claimed.baseUrl);
+    const sessionId = `sess-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const nodeName = sharesResponse.nodeName || (payload.host && payload.host.nodeName) || claimed.nodeName || 'Nodo remoto';
+    const permissions = (sharesResponse.key && sharesResponse.key.permissions) || payload.permissions;
+    const shares = sharesResponse.shares || [];
+
+    clientSessions.set(sessionId, {
+      baseUrl,
+      overrideBaseUrl: claimed.baseUrl || '',
+      keyId: payload.keyId,
+      label: payload.label,
+      nodeName,
+      permissions,
+      token: payload.token,
+      host: payload.host || {},
+      shares,
+      routeInfo
+    });
+
+    store.savePeer({
+      label: payload.label,
+      nodeName,
+      tailscaleIp: payload.host && payload.host.tailscaleIp,
+      lanIp: payload.host && payload.host.lanIp,
+      port: payload.host && payload.host.port,
+      keyId: payload.keyId,
+      keyFilePath: path.join(localKeysDir, backupName)
+    });
+
+    return {
+      sessionId,
+      session: { sessionId, baseUrl, keyId: payload.keyId, label: payload.label, nodeName, permissions, shares, routeInfo },
+      state: await buildFullState()
+    };
+  });
+
+  ipcMain.handle('mini:getState', async () => {
+    if (!lastMemoryStats) {
+      lastMemoryStats = await optimizeProcessMemory({ aggressive: false }).catch(() => null);
+    }
+    return {
+      networks: miniInternetStore.listNetworks(),
+      packages: miniInternetStore.listPackages(),
+      memoryStats: lastMemoryStats
+    };
+  });
+
+  ipcMain.handle('mini:upsertNetwork', async (_e, net) => {
+    const saved = miniInternetStore.upsertNetwork(net || {});
+    return { network: saved, state: await buildFullState() };
+  });
+
+  ipcMain.handle('mini:deleteNetwork', async (_e, id) => {
+    miniInternetStore.deleteNetwork(id);
+    return buildFullState();
+  });
+
+  ipcMain.handle('mini:openPortal', async (_e, { networkId = 'net-global', peerBaseUrl = '' } = {}) => {
+    const port = server.boundPort || store.data.port || 4789;
+    const cleanBase = peerBaseUrl ? peerBaseUrl.replace(/\/$/, '') : `http://127.0.0.1:${port}`;
+    const url = `${cleanBase}/net/${encodeURIComponent(networkId)}`;
+    await shell.openExternal(url);
+    return { ok: true, url };
+  });
+
+  ipcMain.handle('mini:upsertPackage', async (_e, pkg) => {
+    const saved = miniInternetStore.upsertPackage(pkg || {});
+    return { pkg: saved, state: await buildFullState() };
+  });
+
+  ipcMain.handle('mini:deletePackage', async (_e, id) => {
+    miniInternetStore.deletePackage(id);
+    return buildFullState();
+  });
+
+  ipcMain.handle('mini:executePackage', async (_e, { packageId, pkg, targetPeerUrl = 'local' } = {}) => {
+    const targetPkg = pkg || miniInternetStore.listPackages().find((p) => p.id === packageId);
+    if (!targetPkg) throw new Error('Paquete no encontrado.');
+
+    if (!targetPeerUrl || targetPeerUrl === 'local') {
+      const result = await miniInternetStore.executePackageLocally(targetPkg, {
+        configStore: store,
+        openExternalFn: (u) => {
+          if (typeof u === 'string' && /^https?:\/\//i.test(u)) return shell.openExternal(u);
+        },
+        openPathFn: (p) => shell.openPath(p)
+      });
+      return { results: [{ target: store.data.nodeName, ...result }], state: await buildFullState() };
+    }
+
+    const targets = [];
+    if (targetPeerUrl === 'all') {
+      const env = await checkEnvironment();
+      const port = store.data.port || 4789;
+      for (const tp of (env.tailscale.peers || [])) {
+        if (tp.online && tp.ip && tp.os === 'windows') {
+          targets.push({ name: tp.hostName || tp.ip, url: `http://${tp.ip}:${port}` });
+        }
+      }
+    } else {
+      targets.push({ name: targetPeerUrl, url: targetPeerUrl.replace(/\/$/, '') });
+    }
+
+    const results = await Promise.all(
+      targets.map(async (t) => {
+        try {
+          const res = await httpJsonRequest(`${t.url}/api/packages/execute`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ packageId: targetPkg.id, package: targetPkg, senderNode: store.data.nodeName }),
+            timeout: 15000
+          });
+          return { target: t.name, ...res.data };
+        } catch (err) {
+          return { target: t.name, ok: false, error: err.message };
+        }
+      })
+    );
+    return { results, state: await buildFullState() };
+  });
 }
 
 app.on('second-instance', () => {
@@ -1984,7 +2271,17 @@ app.whenReady().then(async () => {
 
   if (process.argv.includes('--minimized') && store.data.minimizeToTray && mainWindow) {
     mainWindow.hide();
+    if (store.data.ultraLightTrayMode) {
+      const w = mainWindow;
+      mainWindow = null;
+      try { if (w && !w.isDestroyed()) w.destroy(); } catch {}
+    }
   }
+
+  // Automatic initial RAM trim (15s after launch so Electron drops idle Chromium pages)
+  setTimeout(() => {
+    optimizeProcessMemory({ aggressive: false }).then((s) => { lastMemoryStats = s; }).catch(() => {});
+  }, 15000);
 
   if (store.data.autoStartServer) {
     try {

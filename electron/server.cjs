@@ -144,7 +144,10 @@ class EstebanCloudServer {
     onSystemAction,
     onVaultList,
     onVaultUpsert,
-    onVaultDelete
+    onVaultDelete,
+    pairingManager,
+    miniInternetStore,
+    onPackageExecute
   } = {}) {
     this.store = configStore;
     this.onLog = onLog || (() => {});
@@ -162,6 +165,9 @@ class EstebanCloudServer {
     this.onVaultList = onVaultList || null;
     this.onVaultUpsert = onVaultUpsert || null;
     this.onVaultDelete = onVaultDelete || null;
+    this.pairingManager = pairingManager || null;
+    this.miniInternetStore = miniInternetStore || null;
+    this.onPackageExecute = onPackageExecute || null;
     this.server = null;
     this.running = false;
     this.boundHost = null;
@@ -327,6 +333,62 @@ class EstebanCloudServer {
           nodeName: this.store.data.nodeName,
           authRequired: true
         });
+      }
+
+      if (req.method === 'GET' && (pathname === '/net' || pathname.startsWith('/net/')) && this.miniInternetStore) {
+        const netId = pathname.replace(/^\/net\/?/, '').split('/')[0] || 'net-global';
+        const visibleShares = isTrustedMeshIp(ip)
+          ? (this.store.data.shares || []).filter((s) => s.enabled).map((s) => ({ name: s.name, mode: s.mode }))
+          : [];
+        const html = this.miniInternetStore.renderMiniInternetPortalHtml({
+          networkId: netId,
+          hostNodeName: this.store.data.nodeName,
+          shares: visibleShares
+        });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        return res.end(html);
+      }
+
+      if (req.method === 'POST' && pathname === '/api/pairing/claim' && this.pairingManager) {
+        if (!this.checkRateLimit(ip)) {
+          return sendJson(res, 429, { error: 'Demasiados intentos fallidos. Espera unos minutos.' });
+        }
+        const body = await readJsonBody(req);
+        const claimed = this.pairingManager.claimPairingCode(body.code);
+        if (!claimed.ok) {
+          this.recordFailure(ip);
+          return sendJson(res, 404, { error: claimed.error || 'Código inválido o expirado.' });
+        }
+        this.clearFailure(ip);
+        this.log('info', `Emparejamiento mágico completado con ${ip} (${claimed.label || 'Llave'})`);
+        return sendJson(res, 200, claimed);
+      }
+
+      if (req.method === 'GET' && pathname === '/api/packages/catalog' && this.miniInternetStore) {
+        if (!isTrustedMeshIp(ip) && !this.authenticateRequest(req)) {
+          return sendJson(res, 401, { error: 'No autorizado para consultar el catálogo.' });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          nodeName: this.store.data.nodeName,
+          networks: this.miniInternetStore.listNetworks(),
+          packages: this.miniInternetStore.listPackages()
+        });
+      }
+
+      if (req.method === 'POST' && pathname === '/api/packages/execute' && this.miniInternetStore) {
+        const keyRec = this.authenticateRequest(req);
+        if (!isTrustedMeshIp(ip) && (!keyRec || keyRec.permissions !== 'rw')) {
+          return sendJson(res, 401, { error: 'No autorizado para desplegar paquetes.' });
+        }
+        const body = await readJsonBody(req);
+        const targetPkg = body.package || body.packageId;
+        if (!targetPkg) return sendJson(res, 400, { error: 'Se requiere packageId o definición del paquete.' });
+        const result = this.onPackageExecute
+          ? await this.onPackageExecute({ pkgOrId: targetPkg, senderNode: body.senderNode || ip })
+          : await this.miniInternetStore.executePackageLocally(targetPkg, { configStore: this.store });
+        this.log('info', `Paquete ejecutado (${result.title || body.packageId}) desde ${body.senderNode || ip}`);
+        return sendJson(res, 200, result);
       }
 
       if (req.method === 'GET' && pathname === '/api/metrics') {

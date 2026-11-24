@@ -6,6 +6,7 @@ Hecho por **Esteban Nicola** · [estebanico.com](https://estebanico.com)
 
 ## Características principales
 
+- **Mini-Internet Multi-Red y Paquetes Inteligentes 1-Clic (v0.6.0):** sub-redes virtuales con portales web (`esteban.mesh`, `diseno.mesh`, `trabajo.mesh`, `ayuda.mesh` en `/net/:id`), **Emparejamiento Mágico en 6 dígitos (`EC-XXXX`)** sin pendrive, **Motor de Eficiencia Extrema de RAM** (`Win32 EmptyWorkingSet` + modo ultra-ligero en bandeja) y **Paquetes 1-Clic** (`WinScript`, `Illustrator Plugins/Drive`, `Portfolio Web estebanico.com`, `Winget Auto-Update`) ejecutables en local o remotamente.
 - **Motor Turbo Transfer 8x (v0.5.0):** descargas paralelas con 8 streams HTTP `Range`, subidas simultáneas con buffers I/O de `4 MB`, `rclone mount` optimizado en multi-stream (`--vfs-read-chunk-streams 8 --vfs-read-chunk-size 16M --vfs-read-ahead 128M`), `PROPFIND` y listado paralelos, selección automática LAN-primero con optimizador UDP directo para Tailscale y velocímetro en tiempo real en la interfaz.
 - **App unificada bidireccional (Electron + React/Vite):** cada PC Windows puede actuar a la vez como **Host** (compartir carpetas con lectura o lectura/escritura sobre REST + WebDAV RFC 4918) y como **Cliente** (montar carpetas remotas como unidad `Z:`, `Y:` vía `rclone` + `WinFsp` o explorarlas directo en la app).
 - **Túnel cifrado global + LAN:** funciona en casa y fuera de casa mediante **Tailscale (WireGuard)** sin abrir puertos en el router ni necesitar IP fija.

@@ -45,6 +45,7 @@ function createDefaultConfig() {
     autoStartServer: true,
     startWithWindows: true,
     minimizeToTray: true,
+    ultraLightTrayMode: true,
     updateShareDir: 'E:\\CODE\\ESTEBAN CLOUD\\release',
     updateServerUrl: '',
     updateGithubRepo: 'estebanico10/esteban-cloud',
@@ -112,7 +113,7 @@ class ConfigStore {
 
   updateSettings(patch) {
     const allowed = [
-      'nodeName', 'port', 'bindMode', 'autoStartServer', 'startWithWindows', 'minimizeToTray',
+      'nodeName', 'port', 'bindMode', 'autoStartServer', 'startWithWindows', 'minimizeToTray', 'ultraLightTrayMode',
       'updateShareDir', 'updateServerUrl', 'updateGithubRepo', 'enableGithubUpdates',
       'autoCheckUpdates', 'autoDownloadUpdates', 'autoInstallWhenIdle',
       'metricThresholds'

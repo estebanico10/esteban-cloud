@@ -18,6 +18,12 @@ const {
   httpsAgent
 } = require('../electron/turbo-transfer.cjs');
 const {
+  optimizeProcessMemory,
+  MagicPairingManager,
+  MiniInternetStore,
+  redeemRemotePairingCode
+} = require('../electron/mini-internet.cjs');
+const {
   compareSemver,
   downloadFileWithProgress,
   parseGitHubReleaseAsset,
@@ -586,4 +592,75 @@ test('turbo-transfer: 8-stream parallel HTTP Range reconstruction (18 MB) & LAN 
   assert.equal(downloadedBuf.length, totalBytes);
   const actualSha = crypto.createHash('sha256').update(downloadedBuf).digest('hex');
   assert.equal(actualSha, expectedSha);
+});
+
+test('mini-internet: MiniInternetStore defaults/CRUD, MagicPairingManager HTTP single-use claim & optimizeProcessMemory', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecloud-mini-test-'));
+  const miniStore = new MiniInternetStore(path.join(tmpDir, 'mini-internet.json'));
+  const cfg = new ConfigStore(path.join(tmpDir, 'config.json'));
+  const pairing = new MagicPairingManager();
+  const srv = new EstebanCloudServer(cfg, { pairingManager: pairing, miniInternetStore: miniStore });
+
+  await srv.start({ host: '127.0.0.1', port: 0 });
+  const baseUrl = `http://127.0.0.1:${srv.boundPort}`;
+
+  t.after(async () => {
+    await srv.stop();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // 1. Default networks & smart packages (WinScript, Illustrator, Esteban Web, Winget)
+  const nets = miniStore.listNetworks();
+  assert.equal(nets.length >= 4, true);
+  assert.ok(nets.some((n) => n.domain === 'diseno.mesh'));
+  const pkgs = miniStore.listPackages();
+  assert.ok(pkgs.some((p) => p.id === 'pkg-winscript'));
+  assert.ok(pkgs.some((p) => p.id === 'pkg-illustrator'));
+  assert.ok(pkgs.some((p) => p.id === 'pkg-esteban-web'));
+
+  // 2. HTML Portal & catalog endpoints
+  const portalRes = await req(`${baseUrl}/net/net-design`);
+  assert.equal(portalRes.status, 200);
+  assert.ok(portalRes.text.includes('diseno.mesh'));
+  assert.ok(portalRes.text.includes('Illustrator'));
+
+  const customPkg = miniStore.upsertPackage({
+    title: 'Test Portfolio',
+    networkId: 'net-help',
+    actionType: 'web-bundle',
+    urls: ['https://estebanico.com'],
+    createDesktopShortcut: true
+  });
+  const shortcutDir = path.join(tmpDir, 'desktop-shortcuts');
+  const execWeb = await miniStore.executePackageLocally(customPkg.id, { dryRun: true, shortcutDir });
+  assert.equal(execWeb.ok, true);
+  assert.ok(fs.existsSync(path.join(shortcutDir, 'Esteban Nicola - Portfolio y Ayuda.url')));
+
+  const execWinScript = await miniStore.executePackageLocally('pkg-winscript', { dryRun: true });
+  assert.equal(execWinScript.ok, true);
+  assert.ok(execWinScript.command.includes('flick9000.WinScript'));
+
+  // 3. Magic Pairing over HTTP (single-use AES-256-GCM + replay protection)
+  const sampleBundle = JSON.stringify({ v: 1, keyId: 'EC-PAIR-TEST', host: { lanIp: '127.0.0.1', port: srv.boundPort } });
+  const invite = pairing.createPairingInvite({
+    bundleJson: sampleBundle,
+    passphrase: 'secret-phrase-test',
+    label: 'Llave Mágica Test',
+    nodeName: 'TEST-HOST'
+  });
+  assert.match(invite.code, /^EC-[A-Z0-9]{4}$/);
+
+  const claimed = await redeemRemotePairingCode({ code: invite.code, candidateUrls: [baseUrl] });
+  assert.equal(claimed.ok, true);
+  assert.equal(claimed.bundleJson, sampleBundle);
+  assert.equal(claimed.passphrase, 'secret-phrase-test');
+
+  await assert.rejects(() => redeemRemotePairingCode({ code: invite.code, candidateUrls: [baseUrl] }));
+
+  // 4. Native Win32/V8 memory optimizer check
+  const memRes = await optimizeProcessMemory({ aggressive: false });
+  assert.equal(memRes.ok, true);
+  assert.equal(typeof memRes.beforeMB, 'number');
+  assert.equal(typeof memRes.afterMB, 'number');
+  assert.ok(memRes.afterMB > 0);
 });

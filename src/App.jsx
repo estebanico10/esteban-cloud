@@ -40,6 +40,7 @@ import {
 import MetricsView from './components/MetricsView.jsx';
 import ChatView from './components/ChatView.jsx';
 import ToolsView from './components/ToolsView.jsx';
+import MiniInternetPackagesView from './components/MiniInternetPackagesView.jsx';
 
 const api = window.estebanCloud;
 
@@ -118,6 +119,7 @@ export default function App() {
   const [clientPass, setClientPass] = useState('');
   const [showClientPass, setShowClientPass] = useState(true);
   const [overrideUrl, setOverrideUrl] = useState('');
+  const [quickPairCode, setQuickPairCode] = useState('');
   const [showAdvancedClient, setShowAdvancedClient] = useState(false);
   const [draggingKey, setDraggingKey] = useState(false);
   const [driveLetter, setDriveLetter] = useState('Z:');
@@ -524,6 +526,10 @@ export default function App() {
             <Sparkles size={17} /> Herramientas y Claves
             <span className="pill-count">{(state.detectedKeys || []).length || 5}</span>
           </button>
+          <button className={`nav-btn ${tab === 'mini' ? 'active' : ''}`} onClick={() => setTab('mini')}>
+            <Globe size={17} /> Mini-Internet y Paquetes
+            <span className="pill-count">{state.miniInternet?.packages?.length || 5}</span>
+          </button>
           <button className={`nav-btn ${tab === 'deps' ? 'active' : ''}`} onClick={() => setTab('deps')}>
             <Wrench size={17} /> Instalador 1-clic
             {!depsReady && <span className="pill-count">!</span>}
@@ -850,6 +856,22 @@ export default function App() {
             flash={flash}
             onQuickConnectKey={handleQuickConnectKey}
             onOpenTab={setTab}
+          />
+        )}
+
+        {tab === 'mini' && (
+          <MiniInternetPackagesView
+            api={api}
+            state={state}
+            flash={flash}
+            onSessionConnected={(res) => {
+              setState(res.state);
+              setActiveSessionId(res.sessionId);
+              setActiveRemoteShare(null);
+              setRemotePath('');
+              setRemoteItems([]);
+              setTab('client');
+            }}
           />
         )}
 
@@ -1380,6 +1402,51 @@ export default function App() {
               <div className="row">
                 <button className="btn" onClick={handleScanUsb}><Usb size={15} /> Buscar llaves en USB</button>
                 <button className="btn" onClick={handlePickKeyFile}><FolderOpen size={15} /> Cargar .ecloudkey</button>
+              </div>
+            </div>
+
+            <div className="card hero-card">
+              <div className="between" style={{ gap: 10, flexWrap: 'wrap' }}>
+                <div>
+                  <h3><Sparkles size={16} color="#67e8f9" /> Conexión Mágica sin Pendrive (Código EC-XXXX)</h3>
+                  <p className="muted" style={{ margin: '2px 0 0' }}>
+                    En el otro PC entra a <strong>Mini-Internet y Paquetes → Generar Código Mágico</strong> y escríbelo aquí para conectar al instante.
+                  </p>
+                </div>
+                <form
+                  className="row"
+                  style={{ gap: 6 }}
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    if (!quickPairCode.trim()) return flash('error', 'Escribe el código mágico (ej. EC-7K9P).');
+                    setBusy(true);
+                    try {
+                      const res = await api.connectWithPairingCode({ code: quickPairCode.trim() });
+                      setState(res.state);
+                      setActiveSessionId(res.sessionId);
+                      setActiveRemoteShare(null);
+                      setRemotePath('');
+                      setRemoteItems([]);
+                      setQuickPairCode('');
+                      flash('ok', `Conectado mágicamente a ${res.session.nodeName} (${res.session.baseUrl}).`);
+                    } catch (err) {
+                      flash('error', err.message);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <input
+                    type="text"
+                    style={{ width: 135, textTransform: 'uppercase' }}
+                    value={quickPairCode}
+                    onChange={(e) => setQuickPairCode(e.target.value)}
+                    placeholder="EC-XXXX"
+                  />
+                  <button type="submit" className="btn btn-primary btn-sm" disabled={busy}>
+                    <Zap size={13} /> Conectar 1-clic
+                  </button>
+                </form>
               </div>
             </div>
 
@@ -1915,6 +1982,14 @@ export default function App() {
                   />
                   <span>Mantener activo en la bandeja del sistema al cerrar la ventana</span>
                 </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(config.ultraLightTrayMode)}
+                    onChange={(e) => setState({ ...state, config: { ...config, ultraLightTrayMode: e.target.checked } })}
+                  />
+                  <span>Modo Ultra-Ligero en bandeja (&lt; 35 MB RAM liberando Chromium al minimizar)</span>
+                </label>
 
                 <button
                   className="btn btn-primary"
@@ -1926,6 +2001,7 @@ export default function App() {
                       autoStartServer: config.autoStartServer,
                       startWithWindows: config.startWithWindows,
                       minimizeToTray: config.minimizeToTray,
+                      ultraLightTrayMode: config.ultraLightTrayMode,
                       updateShareDir: config.updateShareDir,
                       updateServerUrl: config.updateServerUrl,
                       updateGithubRepo: config.updateGithubRepo,
