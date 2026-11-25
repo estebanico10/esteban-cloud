@@ -32,88 +32,32 @@ function execFileAsync(cmd, args, timeout = 6000) {
 }
 
 /**
- * Releases inactive memory pages across the current Electron/Node process tree on Windows
- * using native Win32 EmptyWorkingSet / SetProcessWorkingSetSize plus optional V8 GC.
+ * Releases inactive heap memory in the current Electron/Node process via V8 GC
+ * without spawning PowerShell / C# Add-Type (which caused CPU & 60-120 MB RAM spikes).
  */
-async function optimizeProcessMemory({ aggressive = false, extraProcessNames = [] } = {}) {
+async function optimizeProcessMemory({ aggressive = false } = {}) {
+  const beforeMB = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1));
   try {
     if (typeof global.gc === 'function') {
       global.gc();
+      if (aggressive) {
+        global.gc();
+      }
     }
   } catch {
     // ignore if --expose-gc wasn't passed
   }
 
-  if (process.platform !== 'win32') {
-    const rssMB = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1));
-    return { ok: true, beforeMB: rssMB, afterMB: rssMB, savedMB: 0, processCount: 1, timestamp: new Date().toISOString() };
-  }
-
-  const exeName = path.basename(process.execPath || '').replace(/\.exe$/i, '');
-  const names = Array.from(new Set([
-    exeName,
-    ...(extraProcessNames || []),
-    'Esteban Cloud',
-    'Esteban Mesh Office'
-  ].filter(Boolean)));
-
-  const namesListLiteral = names.map((n) => `'${String(n).replace(/'/g, "''")}'`).join(', ');
-  const psScript = `
-$ErrorActionPreference = 'SilentlyContinue'
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public static class WinMemTrim {
-  [DllImport("psapi.dll", SetLastError = true)]
-  public static extern bool EmptyWorkingSet(IntPtr hProcess);
-  [DllImport("kernel32.dll", SetLastError = true)]
-  public static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
-}
-"@ -Language CSharp
-$selfPid = ${Number(process.pid) || 0}
-$targetNames = @(${namesListLiteral})
-$procs = @(Get-Process | Where-Object { $_.Id -eq $selfPid -or ($_.ProcessName -in $targetNames) })
-if ($procs.Count -eq 0) { $procs = @(Get-Process -Id $selfPid) }
-$before = ($procs | Measure-Object WorkingSet64 -Sum).Sum
-foreach ($p in $procs) {
-  try {
-    [void][WinMemTrim]::EmptyWorkingSet($p.Handle)
-    ${aggressive ? '[void][WinMemTrim]::SetProcessWorkingSetSize($p.Handle, [IntPtr](-1), [IntPtr](-1))' : ''}
-  } catch {}
-}
-Start-Sleep -Milliseconds 120
-$procsAfter = @(Get-Process | Where-Object { $_.Id -eq $selfPid -or ($_.ProcessName -in $targetNames) })
-if ($procsAfter.Count -eq 0) { $procsAfter = @(Get-Process -Id $selfPid) }
-$after = ($procsAfter | Measure-Object WorkingSet64 -Sum).Sum
-[PSCustomObject]@{
-  beforeMB = [Math]::Round($before / 1MB, 1)
-  afterMB = [Math]::Round($after / 1MB, 1)
-  processCount = $procsAfter.Count
-} | ConvertTo-Json -Compress
-`;
-
-  const res = await execFileAsync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], 7000);
-  if (res.ok && res.stdout) {
-    try {
-      const parsed = JSON.parse(res.stdout);
-      const beforeMB = Number(parsed.beforeMB || 0);
-      const afterMB = Number(parsed.afterMB || beforeMB);
-      const savedMB = Number(Math.max(0, beforeMB - afterMB).toFixed(1));
-      return {
-        ok: true,
-        beforeMB,
-        afterMB,
-        savedMB,
-        processCount: Number(parsed.processCount || 1),
-        timestamp: new Date().toISOString()
-      };
-    } catch {
-      // fall through to Node fallback
-    }
-  }
-
-  const rssMB = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1));
-  return { ok: true, beforeMB: rssMB, afterMB: rssMB, savedMB: 0, processCount: 1, timestamp: new Date().toISOString() };
+  const afterMB = Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1));
+  const savedMB = Number(Math.max(0, beforeMB - afterMB).toFixed(1));
+  return {
+    ok: true,
+    beforeMB,
+    afterMB,
+    savedMB,
+    processCount: 1,
+    timestamp: new Date().toISOString()
+  };
 }
 
 const PAIRING_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';

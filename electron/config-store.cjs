@@ -46,6 +46,14 @@ function createDefaultConfig() {
     startWithWindows: true,
     minimizeToTray: true,
     ultraLightTrayMode: true,
+    uiTheme: 'cyan',
+    uiEffects: 'glass',
+    uiDensity: 'comfortable',
+    uiScale: 'normal',
+    resourceProfile: 'auto',
+    autoAssignFreeDrive: true,
+    preferredStartLetter: 'Z:',
+    unifiedMountRoot: path.join(os.homedir(), 'EstebanCloud-Red'),
     updateShareDir: 'E:\\CODE\\ESTEBAN CLOUD\\release',
     updateServerUrl: '',
     updateGithubRepo: 'estebanico10/esteban-cloud',
@@ -64,7 +72,8 @@ function createDefaultConfig() {
     keys: [],
     savedPeers: [],
     keyVault: {},
-    syncProfiles: []
+    syncProfiles: [],
+    driveProfiles: []
   };
 }
 
@@ -87,7 +96,8 @@ class ConfigStore {
           keys: Array.isArray(parsed.keys) ? parsed.keys : [],
           savedPeers: Array.isArray(parsed.savedPeers) ? parsed.savedPeers : [],
           keyVault: (parsed.keyVault && typeof parsed.keyVault === 'object') ? parsed.keyVault : {},
-          syncProfiles: Array.isArray(parsed.syncProfiles) ? parsed.syncProfiles : []
+          syncProfiles: Array.isArray(parsed.syncProfiles) ? parsed.syncProfiles : [],
+          driveProfiles: Array.isArray(parsed.driveProfiles) ? parsed.driveProfiles : []
         };
       }
     } catch {
@@ -114,6 +124,8 @@ class ConfigStore {
   updateSettings(patch) {
     const allowed = [
       'nodeName', 'port', 'bindMode', 'autoStartServer', 'startWithWindows', 'minimizeToTray', 'ultraLightTrayMode',
+      'uiTheme', 'uiEffects', 'uiDensity', 'uiScale', 'resourceProfile',
+      'autoAssignFreeDrive', 'preferredStartLetter', 'unifiedMountRoot',
       'updateShareDir', 'updateServerUrl', 'updateGithubRepo', 'enableGithubUpdates',
       'autoCheckUpdates', 'autoDownloadUpdates', 'autoInstallWhenIdle',
       'metricThresholds'
@@ -266,6 +278,36 @@ class ConfigStore {
 
   removeSyncProfile(id) {
     this.data.syncProfiles = (this.data.syncProfiles || []).filter((p) => p.id !== id);
+    this.save();
+    return true;
+  }
+
+  saveDriveProfile(profile = {}) {
+    this.data.driveProfiles = Array.isArray(this.data.driveProfiles) ? this.data.driveProfiles : [];
+    const cleanId = profile.id || `drv-${crypto.randomBytes(4).toString('hex')}`;
+    const entry = {
+      id: cleanId,
+      keyId: String(profile.keyId || '').trim(),
+      nodeName: String(profile.nodeName || '').trim(),
+      shareSubpath: String(profile.shareSubpath || '').trim(),
+      alias: String(profile.alias || profile.label || profile.nodeName || 'Disco Remoto').trim(),
+      group: String(profile.group || 'General').trim() || 'General',
+      color: String(profile.color || 'cyan').trim() || 'cyan',
+      mountMode: profile.mountMode === 'folder' ? 'folder' : 'letter',
+      preferredDrive: String(profile.preferredDrive || 'AUTO').trim().toUpperCase(),
+      updatedAt: new Date().toISOString()
+    };
+    const idx = this.data.driveProfiles.findIndex(
+      (p) => p.id === cleanId || (entry.keyId && p.keyId === entry.keyId && p.shareSubpath === entry.shareSubpath)
+    );
+    if (idx >= 0) this.data.driveProfiles[idx] = { ...this.data.driveProfiles[idx], ...entry };
+    else this.data.driveProfiles.unshift(entry);
+    this.save();
+    return entry;
+  }
+
+  removeDriveProfile(id) {
+    this.data.driveProfiles = (this.data.driveProfiles || []).filter((p) => p.id !== id);
     this.save();
     return true;
   }

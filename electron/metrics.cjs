@@ -93,8 +93,42 @@ function getRamMetrics() {
   return { totalBytes, freeBytes, usedBytes, percent };
 }
 
+const DISK_META_TTL_MS = 5 * 60 * 1000;
+const DISK_IO_TTL_MS = 15 * 1000;
+const LOCAL_METRICS_TTL_MS = 12 * 1000;
+
+let cachedDiskMeta = { items: null, expiresAt: 0 };
+let cachedDiskIo = { value: 0, expiresAt: 0 };
+let cachedLocalMetrics = { value: null, expiresAt: 0 };
+let localMetricsInFlight = null;
+
+async function refreshDiskSpaceNative(metaItems) {
+  if (typeof fs.promises.statfs !== 'function') return metaItems;
+  const refreshed = await Promise.all(
+    metaItems.map(async (item) => {
+      try {
+        const st = await fs.promises.statfs(`${item.deviceId}\\`);
+        const bsize = Number(st.bsize) || 0;
+        const totalBytes = Math.max(0, bsize * (Number(st.blocks) || 0));
+        const freeBytes = Math.max(0, Math.min(totalBytes, bsize * (Number(st.bavail ?? st.bfree) || 0)));
+        const usedBytes = Math.max(0, totalBytes - freeBytes);
+        const percent = totalBytes > 0 ? round1((usedBytes / totalBytes) * 100) : 0;
+        return { ...item, totalBytes, freeBytes, usedBytes, percent };
+      } catch {
+        return item;
+      }
+    })
+  );
+  return refreshed;
+}
+
 async function getWindowsDisks() {
   if (process.platform !== 'win32') return [];
+
+  const now = Date.now();
+  if (cachedDiskMeta.items && now < cachedDiskMeta.expiresAt) {
+    return refreshDiskSpaceNative(cachedDiskMeta.items);
+  }
 
   const psCmd =
     "@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=2 OR DriveType=3' | " +
@@ -102,12 +136,12 @@ async function getWindowsDisks() {
     'ConvertTo-Json -Compress';
 
   const res = await execPowerShell(psCmd, 5000);
-  if (!res.ok || !res.stdout) return [];
+  if (!res.ok || !res.stdout) return cachedDiskMeta.items || [];
 
   try {
     const parsed = JSON.parse(res.stdout);
     const items = Array.isArray(parsed) ? parsed : [parsed];
-    return items
+    const mapped = items
       .filter((item) => item && item.DeviceID)
       .map((item) => {
         const driveType = Number(item.DriveType) === 2 ? 2 : 3;
@@ -127,13 +161,20 @@ async function getWindowsDisks() {
           percent
         };
       });
+    cachedDiskMeta = { items: mapped, expiresAt: Date.now() + DISK_META_TTL_MS };
+    return mapped;
   } catch {
-    return [];
+    return cachedDiskMeta.items || [];
   }
 }
 
-async function getLiveDiskThroughputMBs(timeoutMs = 2500) {
+async function getLiveDiskThroughputMBs(timeoutMs = 2500, { skipProbe = false } = {}) {
   if (process.platform !== 'win32') return 0;
+
+  const now = Date.now();
+  if (now < cachedDiskIo.expiresAt || skipProbe) {
+    return cachedDiskIo.value;
+  }
 
   const psCmd =
     '$v = $null; ' +
@@ -142,12 +183,14 @@ async function getLiveDiskThroughputMBs(timeoutMs = 2500) {
     'if ($null -ne $v) { [Convert]::ToDouble($v).ToString([System.Globalization.CultureInfo]::InvariantCulture) }';
 
   const res = await execPowerShell(psCmd, timeoutMs);
-  if (!res.ok || !res.stdout) return 0;
+  if (!res.ok || !res.stdout) return cachedDiskIo.value;
 
   const normalized = res.stdout.split(/\r?\n/).pop().trim().replace(',', '.');
   const bytesPerSec = Number.parseFloat(normalized);
-  if (!Number.isFinite(bytesPerSec) || bytesPerSec < 0) return 0;
-  return round1(bytesPerSec / (1024 * 1024));
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec < 0) return cachedDiskIo.value;
+  const val = round1(bytesPerSec / (1024 * 1024));
+  cachedDiskIo = { value: val, expiresAt: Date.now() + DISK_IO_TTL_MS };
+  return val;
 }
 
 function computeStorageSummary(disks) {
@@ -366,47 +409,73 @@ function evaluateAlerts(metrics, thresholds = DEFAULT_THRESHOLDS) {
   return { alerts, isBusy, busyReason };
 }
 
-async function getLocalMetrics({ includeDiskBench = false, thresholds = DEFAULT_THRESHOLDS } = {}) {
-  const [cpu, disks, liveMBs] = await Promise.all([
-    sampleCpuMetrics(180),
-    getWindowsDisks(),
-    getLiveDiskThroughputMBs(2500)
-  ]);
-
-  const ram = getRamMetrics();
-  const storageSummary = computeStorageSummary(disks);
-
-  if (includeDiskBench) {
-    await runDiskSpeedBenchmark();
+async function getLocalMetrics({ includeDiskBench = false, thresholds = DEFAULT_THRESHOLDS, force = false, skipDiskIoProbe = false } = {}) {
+  const now = Date.now();
+  if (!force && !includeDiskBench && cachedLocalMetrics.value && now < cachedLocalMetrics.expiresAt) {
+    const cached = cachedLocalMetrics.value;
+    const { alerts, isBusy, busyReason } = evaluateAlerts(cached, thresholds);
+    return { ...cached, alerts, isBusy, busyReason };
   }
 
-  const diskSpeed = {
-    readMBs: cachedDiskBenchmark ? cachedDiskBenchmark.readMBs : 0,
-    writeMBs: cachedDiskBenchmark ? cachedDiskBenchmark.writeMBs : 0,
-    liveMBs,
-    testedAt: cachedDiskBenchmark ? cachedDiskBenchmark.testedAt : null
-  };
+  if (!force && !includeDiskBench && localMetricsInFlight) {
+    const shared = await localMetricsInFlight;
+    const { alerts, isBusy, busyReason } = evaluateAlerts(shared, thresholds);
+    return { ...shared, alerts, isBusy, busyReason };
+  }
 
-  const baseMetrics = {
-    nodeName: os.hostname(),
-    platform: process.platform,
-    uptimeSec: Math.floor(os.uptime()),
-    timestamp: new Date().toISOString(),
-    cpu,
-    ram,
-    disks,
-    storageSummary,
-    diskSpeed
-  };
+  const run = (async () => {
+    const [cpu, disks, liveMBs] = await Promise.all([
+      sampleCpuMetrics(180),
+      getWindowsDisks(),
+      getLiveDiskThroughputMBs(2500, { skipProbe: skipDiskIoProbe })
+    ]);
 
-  const { alerts, isBusy, busyReason } = evaluateAlerts(baseMetrics, thresholds);
+    const ram = getRamMetrics();
+    const storageSummary = computeStorageSummary(disks);
 
-  return {
-    ...baseMetrics,
-    alerts,
-    isBusy,
-    busyReason
-  };
+    if (includeDiskBench) {
+      await runDiskSpeedBenchmark();
+    }
+
+    const diskSpeed = {
+      readMBs: cachedDiskBenchmark ? cachedDiskBenchmark.readMBs : 0,
+      writeMBs: cachedDiskBenchmark ? cachedDiskBenchmark.writeMBs : 0,
+      liveMBs,
+      testedAt: cachedDiskBenchmark ? cachedDiskBenchmark.testedAt : null
+    };
+
+    const baseMetrics = {
+      nodeName: os.hostname(),
+      platform: process.platform,
+      uptimeSec: Math.floor(os.uptime()),
+      timestamp: new Date().toISOString(),
+      cpu,
+      ram,
+      disks,
+      storageSummary,
+      diskSpeed
+    };
+
+    cachedLocalMetrics = { value: baseMetrics, expiresAt: Date.now() + LOCAL_METRICS_TTL_MS };
+    return baseMetrics;
+  })();
+
+  if (!includeDiskBench) {
+    localMetricsInFlight = run;
+  }
+
+  try {
+    const baseMetrics = await run;
+    const { alerts, isBusy, busyReason } = evaluateAlerts(baseMetrics, thresholds);
+    return {
+      ...baseMetrics,
+      alerts,
+      isBusy,
+      busyReason
+    };
+  } finally {
+    if (localMetricsInFlight === run) localMetricsInFlight = null;
+  }
 }
 
 function resolveNodeAlertState(metrics) {

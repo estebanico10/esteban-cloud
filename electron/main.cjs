@@ -62,12 +62,21 @@ const {
   scanGitProjects,
   gitQuickCommitPush
 } = require('./tools.cjs');
+const {
+  getOptimizerCatalog,
+  buildWinScript,
+  exportWinScriptFile,
+  executeWinScript
+} = require('./win-optimizer.cjs');
 
-// Reduce V8 heap and Chromium background renderer overhead for low-RAM efficiency
+// Reduce V8 heap and Chromium background/cache overhead for low-RAM efficiency
 try {
-  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=192 --optimize-for-size --expose-gc');
+  app.commandLine.appendSwitch('js-flags', '--max-old-space-size=160 --optimize-for-size --expose-gc');
   app.commandLine.appendSwitch('renderer-process-limit', '2');
   app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess');
+  app.commandLine.appendSwitch('disk-cache-size', '33554432');
+  app.commandLine.appendSwitch('media-cache-size', '16777216');
+  app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 } catch {}
 
 // Prevent duplicate instances competing for port 4789 (EADDRINUSE)
@@ -385,6 +394,20 @@ async function resolveReachableBaseUrl(hostInfo, token, overrideBaseUrl) {
   };
 }
 
+const qrDataUrlCache = new Map();
+async function getCachedQrDataUrl(url) {
+  if (!url) return '';
+  if (qrDataUrlCache.has(url)) return qrDataUrlCache.get(url);
+  try {
+    const dataUrl = await QRCode.toDataURL(url, { margin: 1, width: 170, color: { dark: '#eef2f7', light: '#0d1117' } });
+    if (qrDataUrlCache.size > 12) qrDataUrlCache.clear();
+    qrDataUrlCache.set(url, dataUrl);
+    return dataUrl;
+  } catch {
+    return '';
+  }
+}
+
 async function buildFullState() {
   const env = await checkEnvironment();
   const cfg = store.getPublicConfig();
@@ -393,14 +416,10 @@ async function buildFullState() {
   const tailscaleUrl = env.tailscale.ip ? `http://${env.tailscale.ip}:${port}` : '';
   const lanUrl = env.lanIp ? `http://${env.lanIp}:${port}` : '';
 
-  let tailscaleQr = '';
-  let lanQr = '';
-  try {
-    if (tailscaleUrl) tailscaleQr = await QRCode.toDataURL(tailscaleUrl, { margin: 1, width: 170, color: { dark: '#eef2f7', light: '#0d1117' } });
-    if (lanUrl) lanQr = await QRCode.toDataURL(lanUrl, { margin: 1, width: 170, color: { dark: '#eef2f7', light: '#0d1117' } });
-  } catch {
-    // ignore QR failure
-  }
+  const [tailscaleQr, lanQr] = await Promise.all([
+    getCachedQrDataUrl(tailscaleUrl),
+    getCachedQrDataUrl(lanUrl)
+  ]);
 
   const usbInstallerDirs = [];
   for (const d of (env.usbDrives || [])) {
@@ -433,6 +452,7 @@ async function buildFullState() {
     } : null,
     urls: { tailscaleUrl, lanUrl, tailscaleQr, lanQr },
     mounts: mountManager.listMounts(),
+    driveLetters: mountManager.getDriveLettersInfo(cfg.preferredStartLetter || 'Z:'),
     totalUnread: chatStore.getTotalUnread(),
     memoryStats: lastMemoryStats,
     miniInternet: {
@@ -454,6 +474,23 @@ async function buildFullState() {
 
 function registerIpc() {
   ipcMain.handle('cloud:getState', async () => buildFullState());
+
+  ipcMain.handle('winopt:getCatalog', async () => getOptimizerCatalog());
+  ipcMain.handle('winopt:previewScript', async (_e, payload) => {
+    return buildWinScript({ ...(payload || {}), appName: 'Esteban Cloud' });
+  });
+  ipcMain.handle('winopt:exportScript', async (_e, payload) => {
+    const res = await dialog.showSaveDialog(mainWindow, {
+      title: 'Exportar script de optimización PowerShell (.ps1)',
+      defaultPath: path.join(os.homedir(), 'Desktop', 'Esteban-Cloud-WinScript.ps1'),
+      filters: [{ name: 'PowerShell Script', extensions: ['ps1'] }]
+    });
+    if (res.canceled || !res.filePath) return { canceled: true };
+    return exportWinScriptFile({ ...(payload || {}), destPath: res.filePath, appName: 'Esteban Cloud' });
+  });
+  ipcMain.handle('winopt:execute', async (_e, payload) => {
+    return executeWinScript({ ...(payload || {}), appName: 'Esteban Cloud' });
+  });
 
   ipcMain.handle('cloud:updateSettings', async (_e, patch) => {
     const prevPort = store.data.port;
@@ -853,21 +890,131 @@ function registerIpc() {
     return res.data;
   });
 
-  ipcMain.handle('client:mountDrive', async (_e, { sessionId, driveLetter }) => {
+  ipcMain.handle('client:mountDrive', async (_e, payload = {}) => {
+    const {
+      sessionId,
+      driveLetter,
+      mountMode = 'letter',
+      shareSubpath = '',
+      alias = '',
+      group = 'General',
+      color = 'cyan',
+      saveProfile = true
+    } = payload;
     const sess = clientSessions.get(sessionId);
     if (!sess) throw new Error('Sesión remota no activa.');
     if (sess.routeInfo && sess.routeInfo.routeType === 'tailscale-relay') {
       optimizeTailscaleDirectPath(sess.baseUrl).catch(() => {});
     }
+    const lowRamMode =
+      store.data.resourceProfile === 'eco'
+        ? true
+        : store.data.resourceProfile === 'turbo'
+          ? false
+          : undefined;
+    const defaultLabel = shareSubpath
+      ? `${sess.nodeName}-${shareSubpath}`
+      : `EstebanCloud-${sess.nodeName}`;
     const mounted = await mountManager.mountWebDav({
-      driveLetter: driveLetter || 'Z:',
-      label: `EstebanCloud-${sess.nodeName}`,
+      driveLetter: driveLetter || 'AUTO',
+      mountMode,
+      unifiedRootDir: store.data.unifiedMountRoot,
+      shareSubpath,
+      label: alias || defaultLabel,
+      alias: alias || defaultLabel,
+      group: group || 'General',
+      color: color || 'cyan',
+      nodeName: sess.nodeName,
       baseUrl: sess.baseUrl,
       keyId: sess.keyId,
-      token: sess.token
+      token: sess.token,
+      lowRamMode,
+      autoFallbackIfBusy: store.data.autoAssignFreeDrive !== false,
+      preferredStartLetter: store.data.preferredStartLetter || 'Z:'
+    });
+    if (saveProfile) {
+      store.saveDriveProfile({
+        keyId: sess.keyId,
+        nodeName: sess.nodeName,
+        shareSubpath,
+        alias: mounted.alias || defaultLabel,
+        group: mounted.group || 'General',
+        color: mounted.color || 'cyan',
+        mountMode: mounted.mountMode || 'letter',
+        preferredDrive: mounted.mountMode === 'letter' ? mounted.drive : 'AUTO'
+      });
+    }
+    refreshTrayMenu();
+    return { mounted, state: await buildFullState() };
+  });
+
+  ipcMain.handle('client:updateMountOrg', async (_e, { targetDrive, alias, group, color, profileId } = {}) => {
+    const updated = mountManager.updateMountOrganization(targetDrive, { alias, group, color });
+    if (profileId || updated) {
+      store.saveDriveProfile({
+        id: profileId,
+        keyId: updated?.keyId || '',
+        nodeName: updated?.nodeName || '',
+        shareSubpath: updated?.shareSubpath || '',
+        alias: alias || updated?.alias,
+        group: group || updated?.group,
+        color: color || updated?.color,
+        mountMode: updated?.mountMode || 'letter',
+        preferredDrive: updated?.mountMode === 'letter' ? updated.drive : 'AUTO'
+      });
+    }
+    return buildFullState();
+  });
+
+  ipcMain.handle('client:reassignDriveLetter', async (_e, { sessionId, currentDrive, newDriveLetter, mountMode = 'letter' } = {}) => {
+    const activeList = mountManager.listMounts();
+    const current = activeList.find((m) => m.drive.toLowerCase() === String(currentDrive || '').toLowerCase());
+    if (!current) throw new Error('No se encontró la unidad activa para reasignar.');
+    let sess = sessionId ? clientSessions.get(sessionId) : null;
+    if (!sess) {
+      for (const s of clientSessions.values()) {
+        if (current.url.toLowerCase().startsWith(String(s.baseUrl || '').replace(/\/$/, '').toLowerCase())) {
+          sess = s;
+          break;
+        }
+      }
+    }
+    if (!sess) throw new Error('Conéctate primero a la sesión de ese equipo para cambiar la letra en caliente.');
+    await mountManager.unmount(current.drive);
+    await new Promise((r) => setTimeout(r, 600));
+    const mounted = await mountManager.mountWebDav({
+      driveLetter: newDriveLetter || 'AUTO',
+      mountMode,
+      unifiedRootDir: store.data.unifiedMountRoot,
+      shareSubpath: current.shareSubpath || '',
+      label: current.alias || current.label,
+      alias: current.alias || current.label,
+      group: current.group || 'General',
+      color: current.color || 'cyan',
+      nodeName: current.nodeName || sess.nodeName,
+      baseUrl: sess.baseUrl,
+      keyId: sess.keyId,
+      token: sess.token,
+      autoFallbackIfBusy: store.data.autoAssignFreeDrive !== false,
+      preferredStartLetter: store.data.preferredStartLetter || 'Z:'
+    });
+    store.saveDriveProfile({
+      keyId: sess.keyId,
+      nodeName: sess.nodeName,
+      shareSubpath: current.shareSubpath || '',
+      alias: mounted.alias,
+      group: mounted.group,
+      color: mounted.color,
+      mountMode: mounted.mountMode,
+      preferredDrive: mounted.mountMode === 'letter' ? mounted.drive : 'AUTO'
     });
     refreshTrayMenu();
     return { mounted, state: await buildFullState() };
+  });
+
+  ipcMain.handle('client:removeDriveProfile', async (_e, id) => {
+    store.removeDriveProfile(id);
+    return buildFullState();
   });
 
   ipcMain.handle('client:optimizeRoute', async (_e, { sessionId, remountDriveLetter } = {}) => {
@@ -934,8 +1081,10 @@ function registerIpc() {
     return { ok: false };
   });
 
-  ipcMain.handle('client:openDrive', async (_e, driveLetter) => {
-    const p = driveLetter.endsWith('\\') ? driveLetter : `${driveLetter}\\`;
+  ipcMain.handle('client:openDrive', async (_e, driveOrPath) => {
+    const raw = String(driveOrPath || '').trim();
+    if (!raw) return;
+    const p = /^[A-Za-z]:$/.test(raw) ? `${raw}\\` : raw;
     await shell.openPath(p);
   });
 
@@ -1490,12 +1639,12 @@ function registerUpdatesMetricsAndChatIpc() {
     return collectGlobalMetrics({ includeDiskBench: false, notifyOverload: false });
   });
 
-  // Background overload watcher every 45 seconds
+  // Background overload watcher every 90 seconds (low-resource interval)
   setInterval(() => {
     if (!isQuitting) {
       collectGlobalMetrics({ includeDiskBench: false, notifyOverload: true }).catch(() => {});
     }
-  }, 45 * 1000);
+  }, 90 * 1000);
 
   ipcMain.handle('chat:list', async () => {
     return { chats: chatStore.listChats(), totalUnread: chatStore.getTotalUnread() };
@@ -2294,17 +2443,17 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Automatic background update check + local release watcher & mesh broadcast (8s after startup + every 3 minutes)
+  // Automatic background update check + local release watcher & mesh broadcast (low-resource intervals)
   setTimeout(() => {
     syncLocalReleaseToKitsAndMesh().catch(() => {});
     runAutoUpdateCycle({ trigger: 'startup' }).catch(() => {});
   }, 8000);
   setInterval(() => {
     syncLocalReleaseToKitsAndMesh().catch(() => {});
-  }, 45 * 1000);
+  }, 5 * 60 * 1000);
   setInterval(() => {
     runAutoUpdateCycle({ trigger: 'timer' }).catch(() => {});
-  }, 3 * 60 * 1000);
+  }, 15 * 60 * 1000);
 });
 
 app.on('before-quit', async () => {

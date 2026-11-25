@@ -131,13 +131,15 @@ async function detectWinFsp() {
 }
 
 async function detectOpenSshServer() {
-  const res = await execFileAsync('powershell.exe', [
-    '-NoProfile', '-Command',
-    "$s = Get-Service -Name sshd -ErrorAction SilentlyContinue; if ($s) { Write-Output ($s.Status.ToString() + '|' + $s.StartType.ToString()) }"
-  ]);
+  if (process.platform !== 'win32') {
+    return { installed: false, running: false, status: 'NotInstalled', startType: '' };
+  }
+  const res = await execFileAsync('sc.exe', ['query', 'sshd'], { timeout: 4000 });
   if (res.ok && res.stdout) {
-    const [status, startType] = res.stdout.split('|');
-    return { installed: true, running: status === 'Running', status, startType };
+    const running = /STATE\s*:\s*4\s+RUNNING/i.test(res.stdout);
+    const stopped = /STATE\s*:\s*1\s+STOPPED/i.test(res.stdout);
+    const status = running ? 'Running' : stopped ? 'Stopped' : 'Installed';
+    return { installed: true, running, status, startType: '' };
   }
   return { installed: false, running: false, status: 'NotInstalled', startType: '' };
 }
@@ -176,38 +178,179 @@ async function detectRemovableDrives() {
   }
 }
 
-async function checkEnvironment() {
-  const [tailscale, rclone, winfsp, sshd, usbDrives] = await Promise.all([
-    detectTailscale(),
+const ENV_CACHE_TTL_MS = 20_000;
+const STATIC_BIN_CACHE_TTL_MS = 60_000;
+let envCache = { value: null, expiresAt: 0 };
+let envInFlight = null;
+let staticBinCache = { value: null, expiresAt: 0 };
+
+async function getStaticBinsCached(force = false) {
+  const now = Date.now();
+  if (!force && staticBinCache.value && now < staticBinCache.expiresAt) {
+    return staticBinCache.value;
+  }
+  const [rclone, winfsp, sshd] = await Promise.all([
     detectRclone(),
     detectWinFsp(),
-    detectOpenSshServer(),
-    detectRemovableDrives()
+    detectOpenSshServer()
   ]);
-  const net = getNetworkAddresses();
+  const value = { rclone, winfsp, sshd };
+  staticBinCache = { value, expiresAt: now + STATIC_BIN_CACHE_TTL_MS };
+  return value;
+}
+
+async function checkEnvironment({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && envCache.value && now < envCache.expiresAt) {
+    return envCache.value;
+  }
+  if (!force && envInFlight) {
+    return envInFlight;
+  }
+
+  const run = (async () => {
+    const [tailscale, staticBins, usbDrives] = await Promise.all([
+      detectTailscale(),
+      getStaticBinsCached(force),
+      detectRemovableDrives()
+    ]);
+    const net = getNetworkAddresses();
+    const result = {
+      hostName: os.hostname(),
+      userName: os.userInfo().username,
+      lanIp: net.lanIp,
+      tailscale,
+      rclone: staticBins.rclone,
+      winfsp: staticBins.winfsp,
+      sshd: staticBins.sshd,
+      usbDrives
+    };
+    envCache = { value: result, expiresAt: Date.now() + ENV_CACHE_TTL_MS };
+    return result;
+  })();
+
+  envInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (envInFlight === run) envInFlight = null;
+  }
+}
+
+const ALL_DRIVE_LETTERS = Object.freeze([
+  'Z:', 'Y:', 'X:', 'W:', 'V:', 'U:', 'T:', 'S:', 'R:', 'Q:', 'P:', 'O:',
+  'N:', 'M:', 'L:', 'K:', 'J:', 'I:', 'H:', 'G:', 'F:', 'E:', 'D:'
+]);
+
+function sanitizeMountSegment(value, fallback = 'Disco') {
+  const clean = String(value || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 42);
+  return clean || fallback;
+}
+
+function getDriveLettersStatus(mountedMap = new Map(), preferredStartLetter = 'Z:') {
+  const items = ALL_DRIVE_LETTERS.map((letter) => {
+    if (mountedMap && mountedMap.has(letter)) {
+      const m = mountedMap.get(letter);
+      return {
+        letter,
+        status: 'mounted-by-app',
+        free: false,
+        label: m.alias || m.label || '',
+        group: m.group || 'General',
+        nodeName: m.nodeName || ''
+      };
+    }
+    let existsOnOs = false;
+    if (process.platform === 'win32') {
+      try {
+        existsOnOs = fs.existsSync(`${letter}\\`);
+      } catch {
+        existsOnOs = true;
+      }
+    }
+    return {
+      letter,
+      status: existsOnOs ? 'system-busy' : 'free',
+      free: !existsOnOs,
+      label: existsOnOs ? 'En uso (Windows / USB / Red)' : 'Disponible',
+      group: '',
+      nodeName: ''
+    };
+  });
+
+  const pref = String(preferredStartLetter || 'Z:').trim().toUpperCase();
+  const normalizedPref = pref.endsWith(':') ? pref : `${pref}:`;
+  const startIdx = Math.max(0, ALL_DRIVE_LETTERS.indexOf(normalizedPref));
+  const ordered = [...items.slice(startIdx), ...items.slice(0, startIdx)];
+  const nextFree = (ordered.find((x) => x.free) || items.find((x) => x.free) || {}).letter || '';
+
   return {
-    hostName: os.hostname(),
-    userName: os.userInfo().username,
-    lanIp: net.lanIp,
-    tailscale,
-    rclone,
-    winfsp,
-    sshd,
-    usbDrives
+    letters: items,
+    freeLetters: items.filter((x) => x.free).map((x) => x.letter),
+    nextFreeLetter: nextFree
   };
 }
 
 class MountManager {
   constructor({ onLog } = {}) {
     this.onLog = onLog || (() => {});
-    this.mounts = new Map(); // driveLetter -> { drive, label, url, pid, proc, startedAt }
+    this.mounts = new Map(); // mountTarget (e.g. 'Z:' or folder path) -> entry
   }
 
   listMounts() {
     return Array.from(this.mounts.values()).map(({ proc, ...rest }) => rest);
   }
 
-  async mountWebDav({ driveLetter, label, baseUrl, keyId, token }) {
+  getDriveLettersInfo(preferredStartLetter = 'Z:') {
+    return getDriveLettersStatus(this.mounts, preferredStartLetter);
+  }
+
+  updateMountOrganization(targetDrive, { alias, group, color } = {}) {
+    const key = this._resolveMountKey(targetDrive);
+    if (!key) return null;
+    const entry = this.mounts.get(key);
+    if (!entry) return null;
+    if (alias !== undefined) entry.alias = String(alias).trim() || entry.label;
+    if (group !== undefined) entry.group = String(group).trim() || 'General';
+    if (color !== undefined) entry.color = String(color).trim() || 'cyan';
+    const { proc, ...rest } = entry;
+    return rest;
+  }
+
+  _resolveMountKey(driveOrPath) {
+    const raw = String(driveOrPath || '').trim();
+    if (!raw) return null;
+    if (this.mounts.has(raw)) return raw;
+    const upper = raw.toUpperCase().replace(/\\+$/, '');
+    const withColon = upper.length === 1 ? `${upper}:` : upper;
+    if (this.mounts.has(withColon)) return withColon;
+    for (const k of this.mounts.keys()) {
+      if (k.toLowerCase() === raw.toLowerCase()) return k;
+    }
+    return null;
+  }
+
+  async mountWebDav({
+    driveLetter,
+    mountMode = 'letter',
+    unifiedRootDir = '',
+    shareSubpath = '',
+    label,
+    alias = '',
+    group = 'General',
+    color = 'cyan',
+    nodeName = '',
+    baseUrl,
+    keyId,
+    token,
+    lowRamMode,
+    autoFallbackIfBusy = true,
+    preferredStartLetter = 'Z:'
+  } = {}) {
     const rclone = await detectRclone();
     if (!rclone.installed) {
       throw new Error('rclone no está instalado. Usa el botón "Instalar dependencias" primero.');
@@ -218,90 +361,157 @@ class MountManager {
       throw new Error('WinFsp no está instalado. Usa el botón "Instalar dependencias" primero.');
     }
 
-    const cleanDrive = String(driveLetter || 'Z:').trim().toUpperCase().replace(/\\+$/, '');
-    const normalizedDrive = cleanDrive.endsWith(':') ? cleanDrive : `${cleanDrive}:`;
-
-    if (this.mounts.has(normalizedDrive)) {
-      throw new Error(`La unidad ${normalizedDrive} ya está montada por Esteban Cloud.`);
-    }
-
     const obs = await execFileAsync(rcloneExe, ['obscure', token]);
     if (!obs.ok || !obs.stdout) {
       throw new Error('No se pudo preparar la credencial cifrada para rclone.');
     }
 
-    const webdavUrl = `${baseUrl.replace(/\/$/, '')}/webdav/`;
-    const volName = String(label || 'EstebanCloud').replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 28) || 'EstebanCloud';
+    const cleanGroup = sanitizeMountSegment(group || 'General', 'General');
+    const cleanAlias = String(alias || label || nodeName || 'EstebanCloud').trim();
+    const volName = String(cleanAlias).replace(/[^a-zA-Z0-9 _-]/g, '').slice(0, 28) || 'EstebanCloud';
+
+    let mountTarget = '';
+    let autoReassignedFrom = '';
+    const effectiveMode = mountMode === 'folder' ? 'folder' : 'letter';
+
+    if (effectiveMode === 'folder') {
+      const baseRoot = unifiedRootDir
+        ? path.resolve(unifiedRootDir)
+        : path.join(os.homedir(), 'EstebanCloud-Red');
+      const groupDir = path.join(baseRoot, cleanGroup);
+      fs.mkdirSync(groupDir, { recursive: true });
+      const folderLeaf = sanitizeMountSegment(cleanAlias, 'Nodo');
+      mountTarget = path.join(groupDir, folderLeaf);
+      if (this._resolveMountKey(mountTarget)) {
+        throw new Error(`Ya existe un montaje activo en "${mountTarget}".`);
+      }
+      // WinFsp requires the final mountpoint folder NOT to pre-exist on NTFS
+      if (fs.existsSync(mountTarget)) {
+        try {
+          const items = fs.readdirSync(mountTarget);
+          if (items.length === 0) {
+            fs.rmdirSync(mountTarget);
+          } else {
+            mountTarget = path.join(groupDir, `${folderLeaf}-${Date.now().toString().slice(-4)}`);
+          }
+        } catch {
+          mountTarget = path.join(groupDir, `${folderLeaf}-${Date.now().toString().slice(-4)}`);
+        }
+      }
+    } else {
+      const statusInfo = getDriveLettersStatus(this.mounts, preferredStartLetter);
+      const rawReq = String(driveLetter || 'AUTO').trim().toUpperCase().replace(/\\+$/, '');
+      if (!rawReq || rawReq === 'AUTO') {
+        if (!statusInfo.nextFreeLetter) {
+          throw new Error('No quedan letras libres (D: a Z:). Usa el modo "Montar en Carpeta Unificada" (ilimitado).');
+        }
+        mountTarget = statusInfo.nextFreeLetter;
+      } else {
+        const normalizedDrive = rawReq.endsWith(':') ? rawReq : `${rawReq}:`;
+        if (normalizedDrive === 'C:' || normalizedDrive === 'A:' || normalizedDrive === 'B:') {
+          throw new Error(`La letra ${normalizedDrive} está reservada por el sistema. Elige entre D: y Z:.`);
+        }
+        const letterEntry = statusInfo.letters.find((l) => l.letter === normalizedDrive);
+        const isBusy = !letterEntry || !letterEntry.free;
+        if (isBusy) {
+          if (autoFallbackIfBusy && statusInfo.nextFreeLetter) {
+            autoReassignedFrom = normalizedDrive;
+            mountTarget = statusInfo.nextFreeLetter;
+          } else if (this.mounts.has(normalizedDrive)) {
+            throw new Error(`La unidad ${normalizedDrive} ya está montada. Elige otra letra o activa Auto-Letra Libre.`);
+          } else {
+            throw new Error(`La letra ${normalizedDrive} ya está ocupada en Windows. Elige otra letra o usa Auto-Letra Libre.`);
+          }
+        } else {
+          mountTarget = normalizedDrive;
+        }
+      }
+    }
+
+    const useLowRam = lowRamMode === undefined ? os.totalmem() <= 8 * 1024 ** 3 : Boolean(lowRamMode);
+    const cleanSub = String(shareSubpath || '').trim().replace(/^\/+|\/+$/g, '');
+    const webdavUrl = cleanSub
+      ? `${baseUrl.replace(/\/$/, '')}/webdav/${encodeURIComponent(cleanSub)}/`
+      : `${baseUrl.replace(/\/$/, '')}/webdav/`;
+
     const args = [
-      'mount', ':webdav:', normalizedDrive,
+      'mount', ':webdav:', mountTarget,
       '--webdav-url', webdavUrl,
       '--webdav-vendor', 'other',
       '--webdav-user', keyId || 'esteban-cloud',
       '--webdav-pass', obs.stdout,
       '--vfs-cache-mode', 'full',
-      '--vfs-cache-max-size', '20G',
+      '--vfs-cache-max-size', useLowRam ? '4G' : '12G',
       '--vfs-cache-max-age', '24h',
-      '--vfs-read-chunk-size', '16M',
-      '--vfs-read-chunk-size-limit', '256M',
-      '--vfs-read-chunk-streams', '8',
-      '--buffer-size', '64M',
-      '--vfs-read-ahead', '128M',
-      '--transfers', '16',
-      '--checkers', '32',
+      '--vfs-read-chunk-size', useLowRam ? '8M' : '16M',
+      '--vfs-read-chunk-size-limit', useLowRam ? '64M' : '128M',
+      '--vfs-read-chunk-streams', useLowRam ? '4' : '6',
+      '--buffer-size', useLowRam ? '16M' : '32M',
+      '--vfs-read-ahead', useLowRam ? '32M' : '64M',
+      '--transfers', useLowRam ? '4' : '8',
+      '--checkers', useLowRam ? '8' : '16',
       '--vfs-fast-fingerprint',
       '--vfs-write-back', '1s',
       '--no-modtime',
       '--attr-timeout', '30s',
       '--dir-cache-time', '60s',
-      '--network-mode',
+      ...(effectiveMode === 'letter' ? ['--network-mode'] : []),
       '--volname', volName,
       '--no-console'
     ];
 
     const proc = spawn(rcloneExe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const entry = {
-      drive: normalizedDrive,
+      drive: mountTarget,
+      mountMode: effectiveMode,
       label: volName,
+      alias: cleanAlias,
+      group: cleanGroup,
+      color: String(color || 'cyan'),
+      nodeName: String(nodeName || ''),
+      shareSubpath: cleanSub,
+      autoReassignedFrom,
       url: webdavUrl,
       pid: proc.pid,
       proc,
       startedAt: new Date().toISOString()
     };
-    this.mounts.set(normalizedDrive, entry);
+    this.mounts.set(mountTarget, entry);
 
     let errBuf = '';
     proc.stderr.on('data', (d) => {
       const msg = d.toString('utf8').trim();
       if (msg) {
         errBuf += msg + '\n';
-        this.onLog({ ts: new Date().toISOString(), level: 'info', message: `[rclone ${normalizedDrive}] ${msg}` });
+        this.onLog({ ts: new Date().toISOString(), level: 'info', message: `[rclone ${mountTarget}] ${msg}` });
       }
     });
     proc.on('exit', (code) => {
-      this.mounts.delete(normalizedDrive);
-      this.onLog({ ts: new Date().toISOString(), level: 'info', message: `Unidad ${normalizedDrive} desmontada (exit=${code}).` });
+      this.mounts.delete(mountTarget);
+      this.onLog({ ts: new Date().toISOString(), level: 'info', message: `Unidad ${mountTarget} desmontada (exit=${code}).` });
     });
 
     // Wait briefly to confirm it didn't immediately crash
     await new Promise((r) => setTimeout(r, 1400));
-    if (!this.mounts.has(normalizedDrive)) {
-      throw new Error(`rclone no pudo montar ${normalizedDrive}: ${errBuf || 'error desconocido'}`);
+    if (!this.mounts.has(mountTarget)) {
+      throw new Error(`rclone no pudo montar ${mountTarget}: ${errBuf || 'error desconocido'}`);
     }
 
-    return { drive: normalizedDrive, label: volName, url: webdavUrl, pid: proc.pid };
+    const { proc: _p, ...publicEntry } = entry;
+    return publicEntry;
   }
 
-  async unmount(driveLetter) {
-    const clean = String(driveLetter || '').trim().toUpperCase();
-    const normalized = clean.endsWith(':') ? clean : `${clean}:`;
-    const entry = this.mounts.get(normalized);
+  async unmount(driveLetterOrPath) {
+    const key = this._resolveMountKey(driveLetterOrPath);
+    if (!key) return false;
+    const entry = this.mounts.get(key);
     if (!entry) return false;
     try {
       entry.proc.kill('SIGTERM');
     } catch {
       // ignore
     }
-    this.mounts.delete(normalized);
+    this.mounts.delete(key);
     return true;
   }
 
@@ -367,6 +577,8 @@ function launchElevatedInstaller(scriptPath, { port = 4789, installOpenSsh = fal
 }
 
 module.exports = {
+  ALL_DRIVE_LETTERS,
+  getDriveLettersStatus,
   getNetworkAddresses,
   checkEnvironment,
   detectRemovableDrives,

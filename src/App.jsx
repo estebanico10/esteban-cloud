@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, lazy, Suspense } from 'react';
 import {
   Cloud,
   FolderOpen,
@@ -37,10 +37,11 @@ import {
   MessageSquare,
   Zap
 } from 'lucide-react';
-import MetricsView from './components/MetricsView.jsx';
-import ChatView from './components/ChatView.jsx';
-import ToolsView from './components/ToolsView.jsx';
-import MiniInternetPackagesView from './components/MiniInternetPackagesView.jsx';
+const MetricsView = lazy(() => import('./components/MetricsView.jsx'));
+const ChatView = lazy(() => import('./components/ChatView.jsx'));
+const ToolsView = lazy(() => import('./components/ToolsView.jsx'));
+const MiniInternetPackagesView = lazy(() => import('./components/MiniInternetPackagesView.jsx'));
+const DriveOrganizerCard = lazy(() => import('./components/DriveOrganizerCard.jsx'));
 
 const api = window.estebanCloud;
 
@@ -155,22 +156,26 @@ export default function App() {
       const next = await api.getState();
       setState(next);
       if (typeof next.totalUnread === 'number') setUnreadChats(next.totalUnread);
-      if (next.env?.usbDrives?.length && saveDirs.length === 0) {
-        setSaveDirs(next.env.usbDrives.map((d) => d.root));
-      }
-      if (next.env?.usbDrives?.length && !kitTargetDir) {
-        setKitTargetDir(next.env.usbDrives[0].root);
+      if (next.env?.usbDrives?.length) {
+        setSaveDirs((prev) => (prev.length === 0 ? next.env.usbDrives.map((d) => d.root) : prev));
+        setKitTargetDir((prev) => prev || next.env.usbDrives[0].root);
       }
     } catch (err) {
       flash('error', err.message || 'No se pudo cargar el estado.');
     }
-  }, [flash, saveDirs.length, kitTargetDir]);
+  }, [flash]);
 
   useEffect(() => {
     refresh();
     if (!api) return;
-    const unsubLog = api.onLog(() => {
-      api.getState().then(setState).catch(() => {});
+    const unsubLog = api.onLog((entry) => {
+      if (!entry) return;
+      setState((prev) => {
+        if (!prev || !prev.server) return prev;
+        const prevLogs = Array.isArray(prev.server.recentActivity) ? prev.server.recentActivity : [];
+        const nextLogs = [entry, ...prevLogs].slice(0, 60);
+        return { ...prev, server: { ...prev.server, recentActivity: nextLogs } };
+      });
     });
     const unsubUpd = api.onUpdateProgress ? api.onUpdateProgress((p) => setUpdateProgress(p)) : null;
     const unsubTransfer = api.onTransferProgress ? api.onTransferProgress((p) => setTransferProgress(p)) : null;
@@ -190,6 +195,16 @@ export default function App() {
       unsubChat && unsubChat();
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const cfg = state?.config;
+    if (!cfg) return;
+    const root = document.documentElement;
+    root.dataset.theme = cfg.uiTheme || 'cyan';
+    root.dataset.effects = cfg.uiEffects || 'glass';
+    root.dataset.density = cfg.uiDensity || 'comfortable';
+    root.dataset.scale = cfg.uiScale || 'normal';
+  }, [state?.config?.uiTheme, state?.config?.uiEffects, state?.config?.uiDensity, state?.config?.uiScale]);
 
   const filteredRemoteItems = useMemo(() => {
     const q = remoteSearch.trim().toLowerCase();
@@ -351,10 +366,10 @@ export default function App() {
     }
   };
 
-  const handleQuickConnectKey = async (k) => {
+  const handleQuickConnectKey = async (k, { autoMount = false } = {}) => {
     if (!k) return;
     const pass = k.passphrase || state?.config?.keyVault?.[k.keyId]?.passphrase || '';
-    const fPath = k.primaryPath || k.filePath || '';
+    const fPath = k.primaryPath || k.filePath || k.keyFilePath || '';
     const bText = k.bundleJson || '';
     setTab('client');
     setBundleFilePath(fPath);
@@ -373,18 +388,50 @@ export default function App() {
         overrideBaseUrl: overrideUrl.trim() || undefined,
         saveBookmark: true
       });
-      setState(res.state);
+      let nextState = res.state;
       setActiveSessionId(res.sessionId);
       setActiveRemoteShare(null);
       setRemotePath('');
       setRemoteItems([]);
       setRemoteSearch('');
-      flash('ok', `Conectado en 1 clic a ${res.session.nodeName} (${res.session.baseUrl}).`);
+      if (autoMount) {
+        const savedProf = (nextState?.config?.driveProfiles || []).find((p) => p.keyId === res.session.keyId && !p.shareSubpath);
+        const mRes = await api.mountDrive({
+          sessionId: res.sessionId,
+          driveLetter: savedProf?.preferredDrive || 'AUTO',
+          mountMode: savedProf?.mountMode || 'letter',
+          alias: savedProf?.alias || res.session.nodeName,
+          group: savedProf?.group || 'General',
+          color: savedProf?.color || 'cyan'
+        });
+        nextState = mRes.state;
+        setState(nextState);
+        flash('ok', `Conectado y montado ${res.session.nodeName} en ${mRes.mounted.drive}.`);
+      } else {
+        setState(nextState);
+        flash('ok', `Conectado en 1 clic a ${res.session.nodeName} (${res.session.baseUrl}).`);
+      }
     } catch (err) {
       flash('error', err.message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleQuickConnectPeer = (peer, opts = {}) => {
+    const dk = (state?.detectedKeys || []).find((k) => k.keyId === peer.keyId);
+    const savedPass = dk?.passphrase || state?.config?.keyVault?.[peer.keyId]?.passphrase || '';
+    return handleQuickConnectKey(
+      {
+        keyId: peer.keyId,
+        label: peer.label,
+        nodeName: peer.nodeName,
+        primaryPath: dk?.primaryPath || peer.keyFilePath,
+        bundleJson: dk?.bundleJson || '',
+        passphrase: savedPass
+      },
+      opts
+    );
   };
 
   const loadRemoteDir = async (sessionId, share, relPath) => {
@@ -509,6 +556,19 @@ export default function App() {
             <div className="brand-sub">{config.nodeName} · v{state.appVersion}</div>
           </div>
         </div>
+
+        <button
+          type="button"
+          className="web-pill"
+          onClick={() => api.openExternal('https://estebanico.com')}
+          title="Abrir sitio oficial de Esteban Nicola (estebanico.com)"
+        >
+          <span className="row" style={{ gap: 7 }}>
+            <Globe size={14} color="var(--accent)" />
+            <span className="web-pill-domain">estebanico.com</span>
+          </span>
+          <ExternalLink size={13} color="var(--muted)" />
+        </button>
 
         <nav className="nav" aria-label="Navegación principal">
           <div className="nav-section">General</div>
@@ -841,6 +901,7 @@ export default function App() {
           </>
         )}
 
+        <Suspense fallback={<div className="card"><p className="muted">Cargando módulo...</p></div>}>
         {tab === 'metrics' && (
           <MetricsView api={api} flash={flash} />
         )}
@@ -874,6 +935,7 @@ export default function App() {
             }}
           />
         )}
+        </Suspense>
 
         {tab === 'host' && (
           <>
@@ -1501,11 +1563,19 @@ export default function App() {
                           </button>
                           <button
                             type="button"
+                            className="btn btn-sm"
+                            disabled={busy}
+                            onClick={() => handleQuickConnectKey(dk, { autoMount: false })}
+                          >
+                            <Link2 size={13} /> Conectar
+                          </button>
+                          <button
+                            type="button"
                             className="btn btn-sm btn-primary"
                             disabled={busy}
-                            onClick={() => handleQuickConnectKey(dk)}
+                            onClick={() => handleQuickConnectKey(dk, { autoMount: true })}
                           >
-                            <Link2 size={13} /> Conectar en 1 clic
+                            <Zap size={13} /> Conectar + Montar Libre
                           </button>
                         </div>
                       </div>
@@ -1582,115 +1652,20 @@ export default function App() {
                 </button>
               </form>
 
-              <div className="card">
-                <h2>Unidades montadas y equipos guardados</h2>
-                {mounts.length === 0 ? (
-                  <p className="muted">No hay unidades remotas montadas todavía. Conéctate a un nodo y pulsa <strong>Montar como disco Z:</strong>.</p>
-                ) : (
-                  <div className="list">
-                    {mounts.map((m) => (
-                      <div key={m.drive} className="list-item">
-                        <div>
-                          <strong>{m.drive} — {m.label}</strong>
-                          <div className="muted mono">{m.url}</div>
-                        </div>
-                        <div className="row">
-                          <button className="btn btn-sm btn-primary" onClick={() => api.openDrive(m.drive)}>Abrir</button>
-                          <button className="btn btn-sm btn-danger" onClick={async () => setState(await api.unmountDrive(m.drive))}>Desmontar</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {activeSession && (
-                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-                    <div className="between" style={{ marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
-                      <div>
-                        <strong>Sesión activa: {activeSession.nodeName}</strong>
-                        <div className="row" style={{ gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                          <span className="muted mono">{activeSession.baseUrl}</span>
-                          {renderRouteBadge(activeSession.routeInfo)}
-                        </div>
-                      </div>
-                      <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
-                        <button className="btn btn-sm" onClick={handleOptimizeRoute} disabled={busy} title="Fuerza ruta LAN o Tailscale UDP directo y remonta discos en Turbo 8x">
-                          <Zap size={13} /> Optimizar Ruta + Turbo 8x
-                        </button>
-                        <button
-                          className="btn btn-sm"
-                          onClick={() => {
-                            try {
-                              const host = new URL(activeSession.baseUrl).hostname;
-                              api.openSmbShare(host);
-                              flash('ok', `Abriendo recurso nativo Windows SMB \\\\${host}`);
-                            } catch (err) {
-                              flash('error', err.message);
-                            }
-                          }}
-                          title="Abre carpetas compartidas nativas de Windows SMB para máxima velocidad LAN"
-                        >
-                          <FolderOpen size={13} /> SMB Nativo Windows
-                        </button>
-                        <button className="btn btn-sm btn-danger" onClick={async () => setState(await api.disconnectClient(activeSession.sessionId))}>
-                          Desconectar
-                        </button>
-                      </div>
-                    </div>
-                    <div className="row">
-                      <select style={{ width: 96 }} value={driveLetter} onChange={(e) => setDriveLetter(e.target.value)}>
-                        {['Z:', 'Y:', 'X:', 'W:', 'V:', 'U:'].map((d) => <option key={d} value={d}>{d}</option>)}
-                      </select>
-                      <button className="btn btn-primary" onClick={handleMountDrive} disabled={busy}>
-                        <HardDrive size={15} /> Montar disco {driveLetter} (Turbo 8x)
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {config.savedPeers?.length > 0 && (
-                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-                    <h3 style={{ marginBottom: 8 }}><Bookmark size={14} /> Equipos guardados</h3>
-                    <div className="list">
-                      {config.savedPeers.map((peer) => (
-                        <div key={peer.id} className="list-item" style={{ padding: '9px 12px' }}>
-                          <div style={{ minWidth: 0, flex: 1 }}>
-                            <div style={{ fontWeight: 600 }}>{peer.nodeName || peer.label}</div>
-                            <div className="muted mono">{peer.tailscaleIp || peer.lanIp || 'Auto'} · {peer.keyId}</div>
-                          </div>
-                          <div className="row">
-                            {peer.keyFilePath && (
-                              <button
-                                className="btn btn-sm btn-primary"
-                                onClick={() => {
-                                  const dk = (state.detectedKeys || []).find((k) => k.keyId === peer.keyId);
-                                  const savedPass = dk?.passphrase || config.keyVault?.[peer.keyId]?.passphrase || '';
-                                  handleQuickConnectKey({
-                                    keyId: peer.keyId,
-                                    label: peer.label,
-                                    nodeName: peer.nodeName,
-                                    primaryPath: dk?.primaryPath || peer.keyFilePath,
-                                    bundleJson: dk?.bundleJson || '',
-                                    passphrase: savedPass
-                                  });
-                                }}
-                              >
-                                <Link2 size={13} /> Conectar 1-clic
-                              </button>
-                            )}
-                            <button
-                              className="btn btn-sm btn-danger"
-                              onClick={async () => setState(await api.removePeer(peer.id))}
-                            >
-                              <Trash2 size={13} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
+              <Suspense fallback={<div className="card"><p className="muted">Cargando organizador de discos...</p></div>}>
+                <DriveOrganizerCard
+                  api={api}
+                  state={state}
+                  activeSession={activeSession}
+                  busy={busy}
+                  setBusy={setBusy}
+                  setState={setState}
+                  flash={flash}
+                  onQuickConnectAndMount={handleQuickConnectPeer}
+                  onOptimizeRoute={handleOptimizeRoute}
+                  renderRouteBadge={renderRouteBadge}
+                />
+              </Suspense>
             </div>
 
             {activeSession && (
@@ -2002,6 +1977,14 @@ export default function App() {
                       startWithWindows: config.startWithWindows,
                       minimizeToTray: config.minimizeToTray,
                       ultraLightTrayMode: config.ultraLightTrayMode,
+                      uiTheme: config.uiTheme,
+                      uiEffects: config.uiEffects,
+                      uiDensity: config.uiDensity,
+                      uiScale: config.uiScale,
+                      resourceProfile: config.resourceProfile,
+                      autoAssignFreeDrive: config.autoAssignFreeDrive,
+                      preferredStartLetter: config.preferredStartLetter,
+                      unifiedMountRoot: config.unifiedMountRoot,
                       updateShareDir: config.updateShareDir,
                       updateServerUrl: config.updateServerUrl,
                       updateGithubRepo: config.updateGithubRepo,
@@ -2010,12 +1993,162 @@ export default function App() {
                       autoDownloadUpdates: config.autoDownloadUpdates,
                       autoInstallWhenIdle: config.autoInstallWhenIdle
                     });
-                    setState(next);
-                    flash('ok', 'Ajustes guardados.');
+                    setState((prev) => (next && next.config ? next : { ...prev, config: next }));
+                    flash('ok', 'Ajustes y personalización guardados.');
                   }}
                 >
                   Guardar cambios
                 </button>
+              </div>
+
+              <div className="card hero-card">
+                <h2><Sparkles size={17} /> Apariencia, Glassmorphism y Discos</h2>
+                <div className="field">
+                  <label>Paleta de color / Acento</label>
+                  <div className="swatch-row">
+                    {[
+                      { id: 'cyan', label: 'Cian Nube', color: '#38bdf8' },
+                      { id: 'emerald', label: 'Esmeralda', color: '#34d399' },
+                      { id: 'violet', label: 'Violeta Aurora', color: '#a78bfa' },
+                      { id: 'amber', label: 'Ámbar', color: '#fbbf24' },
+                      { id: 'rose', label: 'Rosa Neón', color: '#fb7185' },
+                      { id: 'mono', label: 'Minimal Mono', color: '#e2e8f0' }
+                    ].map((sw) => (
+                      <button
+                        key={sw.id}
+                        type="button"
+                        className={`swatch-btn ${(config.uiTheme || 'cyan') === sw.id ? 'active' : ''}`}
+                        onClick={async () => {
+                          const res = await api.updateSettings({ uiTheme: sw.id });
+                          setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                        }}
+                      >
+                        <span className="swatch-dot" style={{ background: sw.color }} />
+                        {sw.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid-3">
+                  <div className="field">
+                    <label>Efectos visuales</label>
+                    <select
+                      value={config.uiEffects || 'glass'}
+                      onChange={async (e) => {
+                        const res = await api.updateSettings({ uiEffects: e.target.value });
+                        setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                      }}
+                    >
+                      <option value="glass">Glassmorphism Moderno</option>
+                      <option value="minimal">Minimalista (0% GPU · sin blur)</option>
+                      <option value="vivid">Gradientes Aurora Vivos</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Densidad</label>
+                    <select
+                      value={config.uiDensity || 'comfortable'}
+                      onChange={async (e) => {
+                        const res = await api.updateSettings({ uiDensity: e.target.value });
+                        setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                      }}
+                    >
+                      <option value="comfortable">Cómoda</option>
+                      <option value="compact">Compacta</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Escala de texto</label>
+                    <select
+                      value={config.uiScale || 'normal'}
+                      onChange={async (e) => {
+                        const res = await api.updateSettings({ uiScale: e.target.value });
+                        setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                      }}
+                    >
+                      <option value="sm">Compacta (94%)</option>
+                      <option value="normal">Normal (100%)</option>
+                      <option value="lg">Grande (106%)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid-2">
+                  <div className="field">
+                    <label>Perfil de consumo de recursos</label>
+                    <select
+                      value={config.resourceProfile || 'auto'}
+                      onChange={async (e) => {
+                        const res = await api.updateSettings({ resourceProfile: e.target.value });
+                        setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                      }}
+                    >
+                      <option value="auto">Automático según RAM del PC</option>
+                      <option value="eco">Modo Eco Estricto (Mínima RAM)</option>
+                      <option value="turbo">Modo Turbo (Máxima velocidad)</option>
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label>Letra inicial preferida (D: a Z:)</label>
+                    <select
+                      value={config.preferredStartLetter || 'Z:'}
+                      onChange={async (e) => {
+                        const res = await api.updateSettings({ preferredStartLetter: e.target.value });
+                        setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                      }}
+                    >
+                      {(state.driveLetters?.letters || []).map((l) => (
+                        <option key={l.letter} value={l.letter}>{l.letter}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={config.autoAssignFreeDrive !== false}
+                    onChange={async (e) => {
+                      const res = await api.updateSettings({ autoAssignFreeDrive: e.target.checked });
+                      setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                    }}
+                  />
+                  <span>Auto-asignar otra letra libre si la letra elegida ya está usada por otra PC o USB</span>
+                </label>
+
+                <div className="field">
+                  <label>Carpeta raíz para montajes sin letra (más allá de 26 unidades)</label>
+                  <div className="row">
+                    <input
+                      type="text"
+                      style={{ flex: 1 }}
+                      value={config.unifiedMountRoot || ''}
+                      onChange={(e) => setState({ ...state, config: { ...config, unifiedMountRoot: e.target.value } })}
+                      placeholder="C:\Users\...\EstebanCloud-Red"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={async () => {
+                        const dir = await api.pickSaveFolder();
+                        if (dir) {
+                          const res = await api.updateSettings({ unifiedMountRoot: dir });
+                          setState((prev) => (res && res.config ? res : { ...prev, config: res }));
+                        }
+                      }}
+                    >
+                      Elegir
+                    </button>
+                  </div>
+                </div>
+
+                <div className="between" style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                  <span className="muted" style={{ fontSize: 12 }}>Sitio oficial y proyectos de Esteban Nicola:</span>
+                  <button type="button" className="btn btn-sm btn-primary" onClick={() => api.openExternal('https://estebanico.com')}>
+                    <Globe size={13} /> Visitar estebanico.com <ExternalLink size={12} />
+                  </button>
+                </div>
               </div>
 
               <div className="card">

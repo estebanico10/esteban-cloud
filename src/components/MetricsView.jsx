@@ -27,7 +27,7 @@ const DEFAULT_THRESHOLDS = {
   diskBusyMBs: 150
 };
 
-const REFRESH_INTERVAL_MS = 6000;
+const REFRESH_INTERVAL_MS = 12000;
 
 function clampPercent(val) {
   const n = Number(val);

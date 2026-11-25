@@ -3,11 +3,12 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { URL } = require('url');
 const { execFile } = require('child_process');
 
-const STREAM_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4 MB chunks instead of Node's default 64 KB
+const STREAM_HIGH_WATER_MARK = os.totalmem() <= 8 * 1024 ** 3 ? 1024 * 1024 : 2 * 1024 * 1024; // Adaptive Eco I/O buffer
 
 const httpAgent = new http.Agent({
   keepAlive: true,

@@ -50,6 +50,10 @@ contextBridge.exposeInMainWorld('estebanCloud', {
   pickAndConvertImage: (payload) => ipcRenderer.invoke('tools:pickAndConvertImage', payload),
   scanGitProjects: () => ipcRenderer.invoke('tools:scanGitProjects'),
   gitQuickCommitPush: (payload) => ipcRenderer.invoke('tools:gitQuickCommitPush', payload),
+  winOptGetCatalog: () => ipcRenderer.invoke('winopt:getCatalog'),
+  winOptPreviewScript: (payload) => ipcRenderer.invoke('winopt:previewScript', payload),
+  winOptExportScript: (payload) => ipcRenderer.invoke('winopt:exportScript', payload),
+  winOptExecute: (payload) => ipcRenderer.invoke('winopt:execute', payload),
 
   pickKeyFile: () => ipcRenderer.invoke('client:pickKeyFile'),
   scanUsbKeys: () => ipcRenderer.invoke('client:scanUsbKeys'),
@@ -62,6 +66,9 @@ contextBridge.exposeInMainWorld('estebanCloud', {
   downloadRemoteFile: (payload) => ipcRenderer.invoke('client:downloadFile', payload),
   uploadRemoteFiles: (payload) => ipcRenderer.invoke('client:uploadFiles', payload),
   mountDrive: (payload) => ipcRenderer.invoke('client:mountDrive', payload),
+  updateMountOrg: (payload) => ipcRenderer.invoke('client:updateMountOrg', payload),
+  reassignDriveLetter: (payload) => ipcRenderer.invoke('client:reassignDriveLetter', payload),
+  removeDriveProfile: (id) => ipcRenderer.invoke('client:removeDriveProfile', id),
   optimizeRoute: (payload) => ipcRenderer.invoke('client:optimizeRoute', payload),
   unmountDrive: (driveLetter) => ipcRenderer.invoke('client:unmountDrive', driveLetter),
 

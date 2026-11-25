@@ -2,6 +2,7 @@
 
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
@@ -11,7 +12,7 @@ const { findLatestLocalRelease, getDefaultUpdateDirs } = require('./updater.cjs'
 const PKG_VERSION = (() => {
   try { return require('../package.json').version || '0.1.5'; } catch { return '0.1.5'; }
 })();
-const STREAM_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4 MB I/O buffer for high-speed streaming
+const STREAM_HIGH_WATER_MARK = os.totalmem() <= 8 * 1024 ** 3 ? 1024 * 1024 : 2 * 1024 * 1024; // Adaptive Eco I/O buffer
 
 const MIME_MAP = {
   '.html': 'text/html; charset=utf-8',

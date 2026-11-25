@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import {
   KeyRound,
   RefreshCw,
@@ -25,8 +25,11 @@ import {
   Plus
 } from 'lucide-react';
 
+const WinOptimizerPanel = lazy(() => import('./WinOptimizerPanel.jsx'));
+
 const SUB_TABS = [
   { id: 'all', label: 'Todas' },
+  { id: 'winscript', label: '🛠️ WinScript Optimizer' },
   { id: 'keys', label: 'Claves y Accesos Rápidos' },
   { id: 'airdrop', label: '⚡ AirDrop Instantáneo' },
   { id: 'remote', label: '🖥️ Control y Pantalla Remota' },
@@ -3219,6 +3222,11 @@ export default function ToolsView({ api, state, flash, onQuickConnectKey, onOpen
             </div>
           )}
         </div>
+      )}
+      {(activeSection === 'all' || activeSection === 'winscript') && (
+        <Suspense fallback={<div className="card"><p className="muted">Cargando WinScript Studio...</p></div>}>
+          <WinOptimizerPanel api={api} flash={flash} />
+        </Suspense>
       )}
     </>
   );
