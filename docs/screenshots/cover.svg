@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 675" width="1200" height="675">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070b14"/>
+      <stop offset="50%" stop-color="#0b1329"/>
+      <stop offset="100%" stop-color="#050811"/>
+    </linearGradient>
+    <radialGradient id="aurora1" cx="20%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="aurora2" cx="80%" cy="70%" r="50%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="cyanText" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="675" fill="url(#bg)"/>
+  <rect width="1200" height="675" fill="url(#aurora1)"/>
+  <rect width="1200" height="675" fill="url(#aurora2)"/>
+
+  <!-- Subtle Grid lines -->
+  <g opacity="0.08" stroke="#ffffff" stroke-width="1">
+    <line x1="0" y1="135" x2="1200" y2="135"/>
+    <line x1="0" y1="270" x2="1200" y2="270"/>
+    <line x1="0" y1="405" x2="1200" y2="405"/>
+    <line x1="0" y1="540" x2="1200" y2="540"/>
+    <line x1="240" y1="0" x2="240" y2="675"/>
+    <line x1="480" y1="0" x2="480" y2="675"/>
+    <line x1="720" y1="0" x2="720" y2="675"/>
+    <line x1="960" y1="0" x2="960" y2="675"/>
+  </g>
+
+  <!-- Central Glassmorphic Card -->
+  <rect x="100" y="75" width="1000" height="525" rx="32" fill="url(#cardGrad)" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1.5"/>
+
+  <!-- App Icon Glow & Icon -->
+  <circle cx="210" cy="180" r="55" fill="#06b6d4" fill-opacity="0.2" filter="blur(20px)"/>
+  <rect x="160" y="130" width="100" height="100" rx="24" fill="#0c192e" stroke="#38bdf8" stroke-width="2"/>
+  
+  <!-- Cloud Icon Drawing -->
+  <path d="M190 190 A18 18 0 0 1 204 165 A26 26 0 0 1 245 168 A18 18 0 0 1 254 190 Z" fill="#38bdf8"/>
+
+  <!-- Badges Top Right -->
+  <rect x="910" y="115" width="140" height="38" rx="19" fill="#06b6d4" fill-opacity="0.2" stroke="#06b6d4" stroke-width="1.5"/>
+  <text x="980" y="140" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="700" fill="#38bdf8" text-anchor="middle">v0.7.0 Windows</text>
+
+  <!-- Titles -->
+  <text x="290" y="165" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="800" fill="url(#cyanText)" letter-spacing="-0.5">Esteban Cloud</text>
+  <text x="290" y="205" font-family="system-ui, -apple-system, sans-serif" font-size="20" font-weight="500" fill="#94a3b8">Nube Personal Bidireccional en Malla P2P sobre Tailscale</text>
+
+  <!-- Main Feature Preview Grid -->
+  <g transform="translate(150, 270)">
+    <!-- Feature 1 -->
+    <rect x="0" y="0" width="270" height="150" rx="20" fill="#0b1528" fill-opacity="0.7" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>
+    <text x="25" y="45" font-family="system-ui, sans-serif" font-size="28">💾</text>
+    <text x="25" y="85" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#f8fafc">Discos D: a Z:</text>
+    <text x="25" y="115" font-family="system-ui, sans-serif" font-size="14" fill="#94a3b8">23 letras + Auto-Letra libre sin choques entre computadoras</text>
+
+    <!-- Feature 2 -->
+    <rect x="315" y="0" width="270" height="150" rx="20" fill="#0b1528" fill-opacity="0.7" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>
+    <text x="340" y="45" font-family="system-ui, sans-serif" font-size="28">⚡</text>
+    <text x="340" y="85" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#f8fafc">WinScript Studio</text>
+    <text x="340" y="115" font-family="system-ui, sans-serif" font-size="14" fill="#94a3b8">20 ajustes de optimización Windows y perfiles 1-clic</text>
+
+    <!-- Feature 3 -->
+    <rect x="630" y="0" width="270" height="150" rx="20" fill="#0b1528" fill-opacity="0.7" stroke="#ffffff" stroke-opacity="0.1" stroke-width="1"/>
+    <text x="655" y="45" font-family="system-ui, sans-serif" font-size="28">🛡️</text>
+    <text x="655" y="85" font-family="system-ui, sans-serif" font-size="18" font-weight="700" fill="#f8fafc">Llaves .ecloudkey</text>
+    <text x="655" y="115" font-family="system-ui, sans-serif" font-size="14" fill="#94a3b8">Cifrado de grado militar portátil en USB / sin cuentas fijas</text>
+  </g>
+
+  <!-- Bottom Pills -->
+  <g transform="translate(150, 470)">
+    <!-- Pill 1 -->
+    <rect x="0" y="0" width="180" height="42" rx="21" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.15"/>
+    <text x="90" y="26" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#cbd5e1" text-anchor="middle">⚡ Ultra Bajo Consumo</text>
+
+    <!-- Pill 2 -->
+    <rect x="200" y="0" width="190" height="42" rx="21" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.15"/>
+    <text x="295" y="26" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#cbd5e1" text-anchor="middle">🎨 UI Glassmorphism</text>
+
+    <!-- Pill 3 -->
+    <rect x="410" y="0" width="230" height="42" rx="21" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.15"/>
+    <text x="525" y="26" font-family="system-ui, sans-serif" font-size="14" font-weight="600" fill="#cbd5e1" text-anchor="middle">📁 Carpeta Unificada 50+ PCs</text>
+
+    <!-- Author link -->
+    <text x="890" y="26" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#38bdf8" text-anchor="end">Hecho por Esteban Nicola · estebanico.com</text>
+  </g>
+</svg>
